@@ -1,0 +1,9 @@
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Local test artifacts
+*.log

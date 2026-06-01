@@ -1,0 +1,107 @@
+# debian-hardening
+
+> One idempotent Bash script that turns a fresh **Debian** server into a
+> sensible baseline: a sudo user with your SSH key, key-only SSH, a UFW
+> firewall, Fail2Ban and automatic security updates — **without locking you
+> out**.
+
+![Bash](https://img.shields.io/badge/Bash-4EAA25?logo=gnubash&logoColor=white)
+![Debian](https://img.shields.io/badge/Debian-12%20%7C%2013-A81D33?logo=debian&logoColor=white)
+![Shell](https://img.shields.io/badge/POSIX-sh%20safe-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+## Why
+
+Every new server starts with the same chores: create a user, copy your key,
+disable root login and passwords, set up a firewall, install Fail2Ban, enable
+unattended upgrades. Doing it by hand is slow and easy to get subtly wrong (and
+one wrong SSH setting locks you out). This packages that baseline into a single
+script you can read, audit and re-run.
+
+It is intentionally small and dependency-free: just Bash + the standard Debian
+tools. No Ansible, no Python — drop it on the box and run it.
+
+## What it does
+
+| Step | Detail |
+|---|---|
+| **Admin user** | Optional: create a sudo user and install your SSH public key. |
+| **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port. Validates with `sshd -t` before reloading. |
+| **Firewall** | UFW: default deny incoming, allow SSH (and any extra ports you pass). |
+| **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5. |
+| **Updates** | `unattended-upgrades` for automatic security patches. |
+
+### Lockout guard
+
+The script **will not disable SSH password authentication** unless it finds an
+`authorized_keys` for the target user (or root) — so a typo can't lock you out.
+Pass `--pubkey` to install a key first, or `--force-no-password` if you have
+console access and know what you're doing.
+
+## What this demonstrates
+
+- **Automation & idempotency** — every step checks state before acting; safe to
+  re-run. Honours a real `--dry-run`.
+- **Linux security baseline** — SSH hardening, host firewall, brute-force
+  protection and patch automation, the way you'd actually set up a server.
+- **Defensive scripting** — `set -euo pipefail`, root/OS preflight checks,
+  config validation (`sshd -t`) before reload, and a lockout safeguard.
+
+## Usage
+
+```bash
+git clone https://github.com/DannyRuizB/debian-hardening.git
+cd debian-hardening
+chmod +x harden.sh
+
+# See exactly what would change — touches nothing:
+sudo ./harden.sh --dry-run
+
+# Typical run: create an admin user with your key, harden everything,
+# open ports 80/443 for a web server:
+sudo ./harden.sh \
+  --admin-user danny \
+  --pubkey "$(cat ~/.ssh/id_ed25519.pub)" \
+  --allow-port 80/tcp --allow-port 443/tcp
+```
+
+### Options
+
+```
+--ssh-port N           SSH port to allow/protect (default: 22)
+--admin-user NAME      create/ensure this sudo user before locking SSH
+--pubkey "ssh-... "    public key to install for --admin-user
+--allow-port N[/proto] extra port to open in UFW (repeatable)
+--no-ssh | --no-ufw | --no-fail2ban | --no-autoupdates   skip a step
+--force-no-password    disable password auth even with no key (DANGEROUS)
+--dry-run              print what would change, do nothing
+-y, --yes              don't ask for confirmation
+-h, --help             show help
+```
+
+## Verify after running
+
+```bash
+sshd -T | grep -Ei 'passwordauth|permitroot|^port'
+sudo ufw status verbose
+sudo fail2ban-client status sshd
+```
+
+## Tested on
+
+Debian 12 (Bookworm) and Debian 13 (Trixie). Should work on Debian-based
+distros that ship `ufw`, `fail2ban` and `unattended-upgrades`.
+
+> ⚠️ Always run with `--dry-run` first on a host you can reach by console
+> (e.g. the Proxmox/hypervisor shell) the first time, in case of a custom SSH
+> setup.
+
+## About
+
+Built by **[Danny Ruiz](https://github.com/DannyRuizB)** — systems & network
+administrator (ASIR, *Administración de Sistemas Informáticos en Red*).
+[More projects →](https://github.com/DannyRuizB?tab=repositories)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
