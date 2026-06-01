@@ -55,12 +55,14 @@ ok()   { printf '%s[+]%s %s\n' "$c_green"  "$c_reset" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$c_yellow" "$c_reset" "$*" >&2; }
 err()  { printf '%s[x]%s %s\n' "$c_red"    "$c_reset" "$*" >&2; }
 
-# run CMD — honours --dry-run
+# run CMD ARGS... — execute a command, or just print it under --dry-run.
+# Takes a real argument vector (no eval): keeps quoting intact. Commands that
+# need redirection or shell operators are handled inline, not through run().
 run() {
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s %s\n' "$c_yellow" "$c_reset" "$*"
     else
-        eval "$@"
+        "$@"
     fi
 }
 
@@ -122,26 +124,30 @@ ensure_admin_user() {
     if id "$ADMIN_USER" >/dev/null 2>&1; then
         ok "User '$ADMIN_USER' already exists"
     else
-        run "adduser --disabled-password --gecos '' '$ADMIN_USER'"
+        run adduser --disabled-password --gecos "" "$ADMIN_USER"
         ok "Created user '$ADMIN_USER'"
     fi
     # sudo group membership (idempotent)
     if id -nG "$ADMIN_USER" 2>/dev/null | grep -qw sudo; then
         ok "'$ADMIN_USER' already in sudo"
     else
-        run "usermod -aG sudo '$ADMIN_USER'"
+        run usermod -aG sudo "$ADMIN_USER"
         ok "Added '$ADMIN_USER' to sudo"
     fi
     # install pubkey if given and not already present
     if [ -n "$ADMIN_PUBKEY" ]; then
-        local home; home=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
-        run "install -d -m 700 -o '$ADMIN_USER' -g '$ADMIN_USER' '$home/.ssh'"
-        if [ "$DRY_RUN" -eq 0 ] && grep -qsF "$ADMIN_PUBKEY" "$home/.ssh/authorized_keys"; then
+        local home akf
+        home=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
+        akf="$home/.ssh/authorized_keys"
+        run install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$home/.ssh"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf '    %s(dry-run)%s append public key to %s\n' "$c_yellow" "$c_reset" "$akf"
+        elif grep -qsF "$ADMIN_PUBKEY" "$akf"; then
             ok "Public key already installed for '$ADMIN_USER'"
         else
-            run "printf '%s\n' \"\$ADMIN_PUBKEY\" >> '$home/.ssh/authorized_keys'"
-            run "chown '$ADMIN_USER:$ADMIN_USER' '$home/.ssh/authorized_keys'"
-            run "chmod 600 '$home/.ssh/authorized_keys'"
+            printf '%s\n' "$ADMIN_PUBKEY" >> "$akf"
+            chown "$ADMIN_USER:$ADMIN_USER" "$akf"
+            chmod 600 "$akf"
             ok "Installed public key for '$ADMIN_USER'"
         fi
     fi
@@ -176,45 +182,45 @@ PasswordAuthentication ${pw_auth}
 KbdInteractiveAuthentication no
 EOF
 )
-
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would write %s:\n' "$c_yellow" "$c_reset" "$SSHD_DROPIN"
         printf '%s\n' "$content" | sed 's/^/        /'
+        return 0
+    fi
+
+    install -d -m 755 /etc/ssh/sshd_config.d
+    printf '%s\n' "$content" > "$SSHD_DROPIN"
+    chmod 644 "$SSHD_DROPIN"
+    if sshd -t; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd
+        ok "SSH config applied and reloaded"
     else
-        install -d -m 755 /etc/ssh/sshd_config.d
-        printf '%s\n' "$content" > "$SSHD_DROPIN"
-        chmod 644 "$SSHD_DROPIN"
-        if sshd -t; then
-            systemctl reload ssh 2>/dev/null || systemctl reload sshd
-            ok "SSH config applied and reloaded"
-        else
-            err "sshd config test FAILED — not reloading. Check $SSHD_DROPIN"
-            return 1
-        fi
+        err "sshd config test FAILED — not reloading. Check $SSHD_DROPIN"
+        return 1
     fi
 }
 
 setup_ufw() {
     [ "$DO_UFW" -eq 1 ] || { log "Skipping UFW"; return 0; }
     log "Configuring UFW firewall"
-    command -v ufw >/dev/null 2>&1 || run "apt-get install -y ufw"
-    run "ufw --force default deny incoming"
-    run "ufw --force default allow outgoing"
-    run "ufw allow ${SSH_PORT}/tcp"
+    command -v ufw >/dev/null 2>&1 || run apt-get install -y ufw
+    run ufw --force default deny incoming
+    run ufw --force default allow outgoing
+    run ufw allow "${SSH_PORT}/tcp"
     local p
     for p in "${EXTRA_PORTS[@]:-}"; do
         [ -n "$p" ] || continue
-        run "ufw allow ${p}"
+        run ufw allow "$p"
         ok "Allowed extra port: ${p}"
     done
-    run "ufw --force enable"
+    run ufw --force enable
     ok "UFW enabled (deny incoming, SSH on ${SSH_PORT})"
 }
 
 setup_fail2ban() {
     [ "$DO_FAIL2BAN" -eq 1 ] || { log "Skipping Fail2Ban"; return 0; }
     log "Configuring Fail2Ban (sshd jail)"
-    command -v fail2ban-client >/dev/null 2>&1 || run "apt-get install -y fail2ban"
+    command -v fail2ban-client >/dev/null 2>&1 || run apt-get install -y fail2ban
     local jail
     jail=$(cat <<EOF
 # Managed by debian-hardening (harden.sh).
@@ -232,23 +238,25 @@ EOF
 )
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would write %s\n' "$c_yellow" "$c_reset" "$F2B_JAIL"
-    else
-        printf '%s\n' "$jail" > "$F2B_JAIL"
-        systemctl enable --now fail2ban >/dev/null 2>&1 || true
-        systemctl restart fail2ban
-        ok "Fail2Ban configured (ban 1h, maxretry 5, backend systemd)"
+        return 0
     fi
+    printf '%s\n' "$jail" > "$F2B_JAIL"
+    systemctl enable --now fail2ban >/dev/null 2>&1 || true
+    systemctl restart fail2ban
+    ok "Fail2Ban configured (ban 1h, maxretry 5, backend systemd)"
 }
 
 setup_autoupdates() {
     [ "$DO_AUTOUPDATES" -eq 1 ] || { log "Skipping unattended-upgrades"; return 0; }
     log "Enabling unattended security upgrades"
-    run "apt-get install -y unattended-upgrades"
-    if [ "$DRY_RUN" -eq 0 ]; then
-        printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' \
-            > /etc/apt/apt.conf.d/20auto-upgrades
+    run apt-get install -y unattended-upgrades
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s write /etc/apt/apt.conf.d/20auto-upgrades and enable service\n' "$c_yellow" "$c_reset"
+        return 0
     fi
-    run "systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true"
+    printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' \
+        > /etc/apt/apt.conf.d/20auto-upgrades
+    systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
     ok "Unattended security upgrades enabled"
 }
 
@@ -260,14 +268,17 @@ main() {
     log "Plan:"
     [ -n "$ADMIN_USER" ]        && echo "    - ensure sudo user '$ADMIN_USER'"
     [ "$DO_SSH" -eq 1 ]         && echo "    - harden SSH (port $SSH_PORT, key-only, no root)"
-    [ "$DO_UFW" -eq 1 ]        && echo "    - UFW: deny incoming, allow $SSH_PORT/tcp ${EXTRA_PORTS[*]:-}"
+    [ "$DO_UFW" -eq 1 ]         && echo "    - UFW: deny incoming, allow $SSH_PORT/tcp ${EXTRA_PORTS[*]:-}"
     [ "$DO_FAIL2BAN" -eq 1 ]    && echo "    - Fail2Ban sshd jail"
     [ "$DO_AUTOUPDATES" -eq 1 ] && echo "    - unattended security upgrades"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
 
-    [ "$DRY_RUN" -eq 0 ] && { log "Updating package lists"; apt-get update -qq || warn "apt-get update failed"; }
+    if [ "$DRY_RUN" -eq 0 ]; then
+        log "Updating package lists"
+        apt-get update -qq || warn "apt-get update failed"
+    fi
 
     ensure_admin_user
     harden_ssh

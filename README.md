@@ -5,9 +5,10 @@
 > firewall, Fail2Ban and automatic security updates — **without locking you
 > out**.
 
+[![lint](https://github.com/DannyRuizB/debian-hardening/actions/workflows/lint.yml/badge.svg)](https://github.com/DannyRuizB/debian-hardening/actions/workflows/lint.yml)
 ![Bash](https://img.shields.io/badge/Bash-4EAA25?logo=gnubash&logoColor=white)
 ![Debian](https://img.shields.io/badge/Debian-12%20%7C%2013-A81D33?logo=debian&logoColor=white)
-![Shell](https://img.shields.io/badge/POSIX-sh%20safe-blue)
+![ShellCheck](https://img.shields.io/badge/ShellCheck-clean-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ## Why
