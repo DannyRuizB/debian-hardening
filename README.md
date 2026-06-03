@@ -89,10 +89,12 @@ sudo ufw status verbose
 sudo fail2ban-client status sshd
 ```
 
-## Tested on
+## Targets
 
-Debian 12 (Bookworm) and Debian 13 (Trixie). Should work on Debian-based
-distros that ship `ufw`, `fail2ban` and `unattended-upgrades`.
+Written for Debian 12 (Bookworm) and Debian 13 (Trixie), and should work on
+Debian-based distros that ship `ufw`, `fail2ban` and `unattended-upgrades`. The
+script is validated statically in CI (`bash -n` + ShellCheck); always run it
+with `--dry-run` first against a host you can reach by console.
 
 > ⚠️ Always run with `--dry-run` first on a host you can reach by console
 > (e.g. the Proxmox/hypervisor shell) the first time, in case of a custom SSH
