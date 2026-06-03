@@ -26,7 +26,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 
 | Step | Detail |
 |---|---|
-| **Admin user** | Optional: create a sudo user and install your SSH public key. |
+| **Admin user** | Optional: create a sudo user, install your SSH public key, and grant passwordless sudo (the user has no password, so otherwise couldn't escalate). |
 | **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port. Validates with `sshd -t` before reloading. |
 | **Firewall** | UFW: default deny incoming, allow SSH (and any extra ports you pass). |
 | **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5. |
@@ -74,6 +74,7 @@ sudo ./harden.sh \
 --pubkey "ssh-... "    public key to install for --admin-user
 --allow-port N[/proto] extra port to open in UFW (repeatable)
 --no-ssh | --no-ufw | --no-fail2ban | --no-autoupdates   skip a step
+--no-passwordless-sudo don't grant --admin-user passwordless sudo
 --force-no-password    disable password auth even with no key (DANGEROUS)
 --dry-run              print what would change, do nothing
 -y, --yes              don't ask for confirmation

@@ -19,6 +19,8 @@
 #   --ssh-port N           SSH port to allow/protect (default: 22)
 #   --admin-user NAME      create/ensure this sudo user before locking SSH
 #   --pubkey "ssh-ed25519 AAAA..."   public key to install for --admin-user
+#   --no-passwordless-sudo don't grant --admin-user passwordless sudo
+#                          (they have no password, so they couldn't sudo at all)
 #   --allow-port N[/proto] extra port to open in UFW (repeatable), e.g. 80/tcp
 #   --no-ssh               skip SSH hardening
 #   --no-ufw               skip firewall
@@ -42,6 +44,7 @@ DO_UFW=1
 DO_FAIL2BAN=1
 DO_AUTOUPDATES=1
 FORCE_NO_PASSWORD=0
+PASSWORDLESS_SUDO=1
 DRY_RUN=0
 ASSUME_YES=0
 
@@ -67,7 +70,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -80,6 +83,7 @@ while [ $# -gt 0 ]; do
         --no-fail2ban)     DO_FAIL2BAN=0; shift;;
         --no-autoupdates)  DO_AUTOUPDATES=0; shift;;
         --force-no-password) FORCE_NO_PASSWORD=1; shift;;
+        --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
         --dry-run)         DRY_RUN=1; shift;;
         -y|--yes)          ASSUME_YES=1; shift;;
         -h|--help)         usage 0;;
@@ -133,6 +137,32 @@ ensure_admin_user() {
     else
         run usermod -aG sudo "$ADMIN_USER"
         ok "Added '$ADMIN_USER' to sudo"
+    fi
+    # The account is created with --disabled-password (key-only login), so the
+    # sudo group alone isn't enough to escalate — there's no password to type.
+    # Grant passwordless sudo via a drop-in, validated with visudo before it
+    # goes live, so a bad rule can never break sudo on the host.
+    if [ -n "$ADMIN_USER" ] && [ "$PASSWORDLESS_SUDO" -eq 1 ]; then
+        local sudoers_file="/etc/sudoers.d/$ADMIN_USER"
+        local sudoers_rule="$ADMIN_USER ALL=(ALL) NOPASSWD:ALL"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf '    %s(dry-run)%s write %s: %s\n' "$c_yellow" "$c_reset" "$sudoers_file" "$sudoers_rule"
+        elif [ -f "$sudoers_file" ] && grep -qxF "$sudoers_rule" "$sudoers_file"; then
+            ok "Passwordless sudo already configured for '$ADMIN_USER'"
+        else
+            local tmp
+            tmp=$(mktemp)
+            printf '%s\n' "$sudoers_rule" > "$tmp"
+            if visudo -cf "$tmp" >/dev/null 2>&1; then
+                install -m 440 -o root -g root "$tmp" "$sudoers_file"
+                ok "Configured passwordless sudo for '$ADMIN_USER'"
+            else
+                rm -f "$tmp"
+                err "Generated sudoers rule failed validation — not installing"
+                return 1
+            fi
+            rm -f "$tmp"
+        fi
     fi
     # install pubkey if given and not already present
     if [ -n "$ADMIN_PUBKEY" ]; then
