@@ -72,24 +72,28 @@ run() {
 # ---- Arg parsing ----------------------------------------------------------
 usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --ssh-port)        SSH_PORT="$2"; shift 2;;
-        --admin-user)      ADMIN_USER="$2"; shift 2;;
-        --pubkey)          ADMIN_PUBKEY="$2"; shift 2;;
-        --allow-port)      EXTRA_PORTS+=("$2"); shift 2;;
-        --no-ssh)          DO_SSH=0; shift;;
-        --no-ufw)          DO_UFW=0; shift;;
-        --no-fail2ban)     DO_FAIL2BAN=0; shift;;
-        --no-autoupdates)  DO_AUTOUPDATES=0; shift;;
-        --force-no-password) FORCE_NO_PASSWORD=1; shift;;
-        --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
-        --dry-run)         DRY_RUN=1; shift;;
-        -y|--yes)          ASSUME_YES=1; shift;;
-        -h|--help)         usage 0;;
-        *) err "Unknown option: $1"; usage 1;;
-    esac
-done
+# Parse argv into the global flags. Kept as a function (rather than top-level
+# code) so the script can be sourced for unit tests without running it.
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --ssh-port)        SSH_PORT="$2"; shift 2;;
+            --admin-user)      ADMIN_USER="$2"; shift 2;;
+            --pubkey)          ADMIN_PUBKEY="$2"; shift 2;;
+            --allow-port)      EXTRA_PORTS+=("$2"); shift 2;;
+            --no-ssh)          DO_SSH=0; shift;;
+            --no-ufw)          DO_UFW=0; shift;;
+            --no-fail2ban)     DO_FAIL2BAN=0; shift;;
+            --no-autoupdates)  DO_AUTOUPDATES=0; shift;;
+            --force-no-password) FORCE_NO_PASSWORD=1; shift;;
+            --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
+            --dry-run)         DRY_RUN=1; shift;;
+            -y|--yes)          ASSUME_YES=1; shift;;
+            -h|--help)         usage 0;;
+            *) err "Unknown option: $1"; usage 1;;
+        esac
+    done
+}
 
 # ---- Preflight ------------------------------------------------------------
 require_root() {
@@ -319,4 +323,9 @@ main() {
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
 
-main "$@"
+# Only run when executed directly; sourcing (e.g. from the test suite) just
+# loads the functions without parsing args or touching the system.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    parse_args "$@"
+    main
+fi

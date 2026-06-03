@@ -93,8 +93,21 @@ sudo fail2ban-client status sshd
 
 Written for Debian 12 (Bookworm) and Debian 13 (Trixie), and should work on
 Debian-based distros that ship `ufw`, `fail2ban` and `unattended-upgrades`. The
-script is validated statically in CI (`bash -n` + ShellCheck); always run it
-with `--dry-run` first against a host you can reach by console.
+script is checked in CI (`bash -n`, ShellCheck and a bats unit suite); always
+run it with `--dry-run` first against a host you can reach by console.
+
+## Tests
+
+A [bats](https://github.com/bats-core/bats-core) suite covers the script's
+parsing and helpers without touching the host. `main` is guarded behind a
+`BASH_SOURCE` check, so the tests `source` the script to exercise `parse_args`
+(flags, defaults, `--allow-port` accumulation, `--no-*` toggles) and
+`has_authorized_key` (the lockout guard's key check, with `getent` stubbed to a
+temp home), plus the CLI surface (`--help`, unknown options, the root check).
+
+```bash
+bats test/          # needs bats-core (apt install bats, or brew install bats-core)
+```
 
 > ⚠️ Always run with `--dry-run` first on a host you can reach by console
 > (e.g. the Proxmox/hypervisor shell) the first time, in case of a custom SSH

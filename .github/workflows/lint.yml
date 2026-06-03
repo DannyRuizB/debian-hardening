@@ -1,7 +1,8 @@
 name: lint
 
-# Static checks on every push and pull request: shell syntax + ShellCheck.
-# No host is touched — these only analyse the script.
+# Checks on every push and pull request: shell syntax, ShellCheck, and the bats
+# unit tests over the script's argument parsing and helpers. No host is touched —
+# the tests source the script (its `main` is guarded) without running it.
 on:
   push:
     branches: [main]
@@ -22,3 +23,9 @@ jobs:
 
       - name: ShellCheck
         run: shellcheck harden.sh
+
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Unit tests (bats)
+        run: bats test/
