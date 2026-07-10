@@ -268,6 +268,10 @@ port     = ${SSH_PORT}
 bantime  = 1h
 findtime = 10m
 maxretry = 5
+# OpenSSH >= 9.8 splits auth into an 'sshd-session' process, so the stock
+# filter's '_COMM=sshd' journal match misses the failures and never bans.
+# Match on the ssh unit alone (covers sshd and its sshd-session children).
+journalmatch = _SYSTEMD_UNIT=ssh.service
 EOF
 )
     if [ "$DRY_RUN" -eq 1 ]; then
