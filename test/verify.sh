@@ -99,6 +99,13 @@ if [ "$banned" = yes ]; then
 else
   fail "repeated failed logins get the attacker banned"
 fi
+# fail2ban marks the ban a moment before banaction=ufw inserts the REJECT rule,
+# so wait for the rule to actually land before testing the locked-out login —
+# otherwise a fast runner slips a connection through the gap.
+for _ in $(seq 1 10); do
+  docker exec db-harden-node ufw status 2>/dev/null | grep -qiE "REJECT|DENY" && break
+  sleep 1
+done
 # And the attacker's experience: even a GOOD key is refused once banned.
 if ssh "${OPTS[@]}" -o ConnectTimeout=3 -i "$KEY" opsadmin@127.0.0.1 true >/dev/null 2>&1; then
   fail "banned client is locked out even with a valid key"
