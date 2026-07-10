@@ -214,6 +214,12 @@ PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication ${pw_auth}
 KbdInteractiveAuthentication no
+# CIS-style extra hardening.
+MaxAuthTries 4
+X11Forwarding no
+LoginGraceTime 60
+ClientAliveInterval 300
+ClientAliveCountMax 3
 EOF
 )
     if [ "$DRY_RUN" -eq 1 ]; then

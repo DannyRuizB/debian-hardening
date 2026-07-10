@@ -1,0 +1,63 @@
+# Compliance audit — grading the node against a CIS-style checklist
+
+[`audit.sh`](audit.sh) scores the hardened node against a broader checklist than
+`verify.sh` uses. `verify.sh` confirms *the baseline was applied*; this grades a
+wider set of best practices — deliberately including ones the baseline may not
+cover — so the score is honest and any failures read as a to-do list.
+
+## Run it
+
+```bash
+cd tests
+./node.sh up && ./node.sh wait
+
+docker exec db-harden-node bash /root/harden.sh --admin-user opsadmin --pubkey "$(cat .ssh_ci/id_ci.pub)" -y
+./audit.sh
+```
+
+## Grading
+
+Each check is `PASS` (control in place), `WARN` (a CIS hardening not applied —
+improvable) or `FAIL` (a core control missing — serious). The score weights
+`WARN` as a half-point:
+
+```
+Score = (PASS + 0.5*WARN) / total * 100
+```
+
+Categories: SSH authentication (core), SSH hardening extras (CIS), firewall,
+intrusion prevention, patch management, and accounts & files.
+
+## What it caught — and the fix
+
+On first run the baseline scored **89% (14 PASS, 4 WARN, 0 FAIL)**. Zero core
+failures, but four CIS extras that the SSH drop-in didn't set:
+
+| WARN | Was | CIS wants |
+|---|---|---|
+| `MaxAuthTries` | 6 | ≤ 4 |
+| `X11Forwarding` | yes | no |
+| `LoginGraceTime` | 120 | ≤ 60 |
+| `ClientAliveInterval` | 0 (no idle timeout) | 300 |
+
+So the audit became a to-do list, and `harden.sh`'s SSH drop-in now sets all
+four (`MaxAuthTries 4`, `X11Forwarding no`, `LoginGraceTime 60`,
+`ClientAliveInterval 300` + `ClientAliveCountMax 3`). Re-hardening and
+re-auditing:
+
+```
+ Score: 18 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+```
+
+Idempotence held (the drop-in's hash is unchanged on a second run) and the e2e
+`verify.sh` still passes — the extra directives tighten the config without
+changing key-only behaviour. That's the whole loop:
+**audit → find gaps → remediate → re-audit.**
+
+## Honesty
+
+This is a lightweight, SSH-and-service-focused checklist, not a full CIS
+Benchmark or a Lynis run. 100% here means "compliant with *these* checks" — it
+doesn't cover filesystem mount options, auditd, AppArmor, password-aging policy,
+or the dozens of other items a full benchmark grades. It's a useful, honest
+scorecard for the controls this baseline is actually responsible for.

@@ -28,7 +28,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 | Step | Detail |
 |---|---|
 | **Admin user** | Optional: create a sudo user, install your SSH public key, and grant passwordless sudo (the user has no password, so otherwise couldn't escalate). |
-| **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port. Validates with `sshd -t` before reloading. |
+| **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port, plus CIS extras (`MaxAuthTries`, `X11Forwarding no`, `LoginGraceTime`, idle timeout). Validates with `sshd -t` before reloading. |
 | **Firewall** | UFW: default deny incoming, allow SSH (and any extra ports you pass). |
 | **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5, journal match on the ssh unit (works with OpenSSH ≥ 9.8's `sshd-session`). |
 | **Updates** | `unattended-upgrades` for automatic security patches. |
@@ -136,11 +136,21 @@ docker exec db-harden-node bash /root/harden.sh --admin-user opsadmin \
 The same run also covers **flag behaviour** with
 [`test/scenarios.sh`](test/scenarios.sh) — the lockout guard (no key → password
 auth stays on; `--force-no-password` overrides it), a custom `--ssh-port` (sshd
-and UFW stay in sync), `--allow-port`, and `--no-fail2ban` — and there's a
-**red-team** ([`test/redteam.sh`](test/redteam.sh)) that *attacks* the hardened
-node from the outside, handing the attacker a valid key and the correct
-passwords and watching every attempt bounce ([`test/REDTEAM.md`](test/REDTEAM.md),
-[`test/SCENARIOS.md`](test/SCENARIOS.md)).
+and UFW stay in sync), `--allow-port`, and `--no-fail2ban`.
+
+### Security lab
+
+Beyond the CI checks, `test/` is a small hands-on security lab against the
+hardened node — each script self-contained and local:
+
+| Script | What it does |
+|---|---|
+| [`redteam.sh`](test/redteam.sh) | *Attacks* the node with a valid key **and** the correct passwords — 7 attacks repelled, 0 leaks ([REDTEAM.md](test/REDTEAM.md)) |
+| [`forensics.sh`](test/forensics.sh) | Blue-team: stages an attack and reconstructs it from the node's logs — who, which accounts, how Fail2Ban responded ([FORENSICS.md](test/FORENSICS.md)) |
+| [`before_after.sh`](test/before_after.sh) | Same attack against a stock Debian node vs the hardened one, side by side ([BEFORE_AFTER.md](test/BEFORE_AFTER.md)) |
+| [`attacks.sh`](test/attacks.sh) | Catalogue of recon/login techniques — banner grab, port scan, user enumeration, dictionary — each bouncing off its control ([ATTACKS.md](test/ATTACKS.md)) |
+| [`audit.sh`](test/audit.sh) | Grades the node against a CIS-style checklist and scores it — drove the SSH drop-in's extra hardening (now 100%) ([AUDIT.md](test/AUDIT.md)) |
+| [`scenarios.sh`](test/scenarios.sh) | Asserts the flags behave (lockout guard, custom port, extra ports, skips) ([SCENARIOS.md](test/SCENARIOS.md)) |
 
 > ⚠️ Always run with `--dry-run` first on a host you can reach by console
 > (e.g. the Proxmox/hypervisor shell) the first time, in case of a custom SSH
