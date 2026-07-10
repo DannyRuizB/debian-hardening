@@ -50,3 +50,9 @@ jobs:
       - name: Tear the node down
         if: always()
         run: ./test/node.sh down
+
+      # Independent of the node above: hardens fresh throwaway containers with
+      # different flag sets and asserts each behaves (lockout guard, custom
+      # port, extra ports, skipping a step).
+      - name: Scenario tests (flag behaviour)
+        run: ./test/scenarios.sh

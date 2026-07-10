@@ -133,6 +133,15 @@ docker exec db-harden-node bash /root/harden.sh --admin-user opsadmin \
 > `sshd-session` process, so Fail2Ban's stock `_COMM=sshd` journal match missed
 > every failure and never banned. The jail now matches on the ssh unit instead.
 
+The same run also covers **flag behaviour** with
+[`test/scenarios.sh`](test/scenarios.sh) — the lockout guard (no key → password
+auth stays on; `--force-no-password` overrides it), a custom `--ssh-port` (sshd
+and UFW stay in sync), `--allow-port`, and `--no-fail2ban` — and there's a
+**red-team** ([`test/redteam.sh`](test/redteam.sh)) that *attacks* the hardened
+node from the outside, handing the attacker a valid key and the correct
+passwords and watching every attempt bounce ([`test/REDTEAM.md`](test/REDTEAM.md),
+[`test/SCENARIOS.md`](test/SCENARIOS.md)).
+
 > ⚠️ Always run with `--dry-run` first on a host you can reach by console
 > (e.g. the Proxmox/hypervisor shell) the first time, in case of a custom SSH
 > setup.
