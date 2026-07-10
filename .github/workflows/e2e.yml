@@ -1,0 +1,52 @@
+name: e2e
+
+# The real proof: boot a disposable Debian "server" (systemd container), run
+# harden.sh inside it for real, run it again to prove idempotence, then verify
+# every promise from the outside over SSH. Linting checks the script parses;
+# this checks it actually hardens.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  harden-and-verify:
+    name: Harden a disposable Debian node + verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Boot the test node
+        run: ./test/node.sh up && ./test/node.sh wait
+
+      - name: "First pass: run harden.sh inside the node (as root)"
+        run: |
+          docker exec db-harden-node bash /root/harden.sh \
+            --admin-user opsadmin \
+            --pubkey "$(cat test/.ssh_ci/id_ci.pub)" -y
+
+      - name: "Second pass: idempotence (config files must not change)"
+        run: |
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades"
+          before=$(docker exec db-harden-node sha256sum $files)
+          docker exec db-harden-node bash /root/harden.sh \
+            --admin-user opsadmin \
+            --pubkey "$(cat test/.ssh_ci/id_ci.pub)" -y
+          after=$(docker exec db-harden-node sha256sum $files)
+          if [ "$before" != "$after" ]; then
+            echo "::error::harden.sh is not idempotent — config changed on the second run"
+            diff <(echo "$before") <(echo "$after") || true
+            exit 1
+          fi
+          echo "Idempotent: config unchanged on the second run."
+
+      - name: Verify the hardening from the outside
+        run: ./test/verify.sh
+
+      - name: Tear the node down
+        if: always()
+        run: ./test/node.sh down

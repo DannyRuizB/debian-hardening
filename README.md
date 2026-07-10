@@ -6,6 +6,7 @@
 > out**.
 
 [![lint](https://github.com/DannyRuizB/debian-hardening/actions/workflows/lint.yml/badge.svg)](https://github.com/DannyRuizB/debian-hardening/actions/workflows/lint.yml)
+[![e2e](https://github.com/DannyRuizB/debian-hardening/actions/workflows/e2e.yml/badge.svg)](https://github.com/DannyRuizB/debian-hardening/actions/workflows/e2e.yml)
 ![Bash](https://img.shields.io/badge/Bash-4EAA25?logo=gnubash&logoColor=white)
 ![Debian](https://img.shields.io/badge/Debian-12%20%7C%2013-A81D33?logo=debian&logoColor=white)
 ![ShellCheck](https://img.shields.io/badge/ShellCheck-clean-brightgreen)
@@ -29,7 +30,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 | **Admin user** | Optional: create a sudo user, install your SSH public key, and grant passwordless sudo (the user has no password, so otherwise couldn't escalate). |
 | **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port. Validates with `sshd -t` before reloading. |
 | **Firewall** | UFW: default deny incoming, allow SSH (and any extra ports you pass). |
-| **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5. |
+| **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5, journal match on the ssh unit (works with OpenSSH ≥ 9.8's `sshd-session`). |
 | **Updates** | `unattended-upgrades` for automatic security patches. |
 
 ### Lockout guard
@@ -108,6 +109,29 @@ temp home), plus the CLI surface (`--help`, unknown options, the root check).
 ```bash
 bats test/          # needs bats-core (apt install bats, or brew install bats-core)
 ```
+
+### End-to-end (it actually hardens a box)
+
+Linting proves the script *parses*; the [`e2e` workflow](.github/workflows/e2e.yml)
+proves it *hardens*. On every push it boots a disposable Debian 13 systemd
+container, runs `harden.sh` inside it for real, runs it again to prove
+idempotence (the config files' hashes must not change), and then attacks the
+result from the outside with [`test/verify.sh`](test/verify.sh): root login
+refused, password auth not offered, UFW active, and a live brute-force burst
+that must end with the attacker **banned by Fail2Ban**. Reproduce it locally:
+
+```bash
+cd test
+./node.sh up && ./node.sh wait
+docker exec db-harden-node bash /root/harden.sh --admin-user opsadmin \
+  --pubkey "$(cat .ssh_ci/id_ci.pub)" -y
+./verify.sh
+./node.sh down
+```
+
+> This e2e caught a real bug: on OpenSSH ≥ 9.8 the auth work moved to an
+> `sshd-session` process, so Fail2Ban's stock `_COMM=sshd` journal match missed
+> every failure and never banned. The jail now matches on the ssh unit instead.
 
 > ⚠️ Always run with `--dry-run` first on a host you can reach by console
 > (e.g. the Proxmox/hypervisor shell) the first time, in case of a custom SSH
