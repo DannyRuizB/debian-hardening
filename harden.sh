@@ -360,6 +360,13 @@ EOF
     fi
     printf '%s\n' "$content" > "$SYSCTL_DROPIN"
     chmod 644 "$SYSCTL_DROPIN"
+    # UFW ships an explicit log_martians=0 in /etc/ufw/sysctl.conf and
+    # re-applies it on every start/reload (IPT_SYSCTL in /etc/default/ufw) —
+    # silently undoing our drop-in after any reboot or ufw reload. Keep both
+    # sources in agreement.
+    if [ -f /etc/ufw/sysctl.conf ]; then
+        sed -i 's|^net/ipv4/conf/all/log_martians=0$|net/ipv4/conf/all/log_martians=1|; s|^net/ipv4/conf/default/log_martians=0$|net/ipv4/conf/default/log_martians=1|' /etc/ufw/sysctl.conf
+    fi
     # -e ignores keys this kernel doesn't have. In an unprivileged container
     # some keys are read-only; the file is still in place for the next boot,
     # so that's a warning, not a failure.

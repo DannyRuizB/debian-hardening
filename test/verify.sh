@@ -81,6 +81,11 @@ expect_line "ICMP redirects are not sent" "^0$" sudo sysctl -n net.ipv4.conf.all
 expect_line "source-routed packets are refused" "^0$" sudo sysctl -n net.ipv4.conf.all.accept_source_route
 expect_line "reverse-path filtering is on" "^1$" sudo sysctl -n net.ipv4.conf.all.rp_filter
 expect_line "martian packets are logged" "^1$" sudo sysctl -n net.ipv4.conf.all.log_martians
+# UFW re-applies its own sysctl file (log_martians=0) on every reload — make
+# sure harden.sh reconciled it, or this value silently reverts on reboot.
+on_node sudo ufw reload >/dev/null 2>&1 || true
+sleep 1
+expect_line "martian logging survives a ufw reload" "^1$" sudo sysctl -n net.ipv4.conf.all.log_martians
 expect_line "SYN cookies are enabled" "^1$" sudo sysctl -n net.ipv4.tcp_syncookies
 expect_line "dmesg is restricted to root" "^1$" sudo sysctl -n kernel.dmesg_restrict
 expect_line "setuid binaries cannot dump core" "^0$" sudo sysctl -n fs.suid_dumpable
