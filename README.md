@@ -32,6 +32,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 | **Firewall** | UFW: default deny incoming, allow SSH (and any extra ports you pass). |
 | **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5, journal match on the ssh unit (works with OpenSSH ≥ 9.8's `sshd-session`). |
 | **Updates** | `unattended-upgrades` for automatic security patches. |
+| **Kernel (sysctl)** | Drop-in `/etc/sysctl.d/99-hardening.conf`: no ICMP redirects (in or out), no source routing, reverse-path filtering, martian logging, SYN cookies, restricted `dmesg` / kernel pointers, no setuid core dumps. Deliberately leaves `accept_ra` (IPv6 SLAAC on VPSes) and `ip_forward` (routers / Docker hosts) alone. |
 
 ### Lockout guard
 
@@ -74,7 +75,7 @@ sudo ./harden.sh \
 --admin-user NAME      create/ensure this sudo user before locking SSH
 --pubkey "ssh-... "    public key to install for --admin-user
 --allow-port N[/proto] extra port to open in UFW (repeatable)
---no-ssh | --no-ufw | --no-fail2ban | --no-autoupdates   skip a step
+--no-ssh | --no-ufw | --no-fail2ban | --no-autoupdates | --no-sysctl   skip a step
 --no-passwordless-sudo don't grant --admin-user passwordless sudo
 --force-no-password    disable password auth even with no key (DANGEROUS)
 --dry-run              print what would change, do nothing
