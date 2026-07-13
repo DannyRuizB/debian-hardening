@@ -11,6 +11,8 @@
 #   3. UFW firewall: default deny incoming, allow SSH (+ extra ports).
 #   4. Fail2Ban: sshd jail backed by systemd + ufw.
 #   5. Unattended security upgrades.
+#   6. Kernel hardening via sysctl (no ICMP redirects, no source routing,
+#      rp_filter, syncookies, restricted dmesg/kptr).
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -26,6 +28,7 @@
 #   --no-ufw               skip firewall
 #   --no-fail2ban          skip Fail2Ban
 #   --no-autoupdates       skip unattended-upgrades
+#   --no-sysctl            skip kernel hardening (sysctl)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -43,6 +46,7 @@ DO_SSH=1
 DO_UFW=1
 DO_FAIL2BAN=1
 DO_AUTOUPDATES=1
+DO_SYSCTL=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -50,6 +54,7 @@ ASSUME_YES=0
 
 SSHD_DROPIN="/etc/ssh/sshd_config.d/99-hardening.conf"
 F2B_JAIL="/etc/fail2ban/jail.local"
+SYSCTL_DROPIN="/etc/sysctl.d/99-hardening.conf"
 
 # ---- Pretty logging -------------------------------------------------------
 c_reset=$'\e[0m'; c_blue=$'\e[34m'; c_green=$'\e[32m'; c_yellow=$'\e[33m'; c_red=$'\e[31m'
@@ -70,7 +75,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -85,6 +90,7 @@ parse_args() {
             --no-ufw)          DO_UFW=0; shift;;
             --no-fail2ban)     DO_FAIL2BAN=0; shift;;
             --no-autoupdates)  DO_AUTOUPDATES=0; shift;;
+            --no-sysctl)       DO_SYSCTL=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -304,6 +310,66 @@ setup_autoupdates() {
     ok "Unattended security upgrades enabled"
 }
 
+setup_sysctl() {
+    [ "$DO_SYSCTL" -eq 1 ] || { log "Skipping kernel hardening (sysctl)"; return 0; }
+    log "Hardening kernel parameters (drop-in $SYSCTL_DROPIN)"
+    local content
+    content=$(cat <<'EOF'
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+#
+# Deliberately NOT set here, to keep the "won't lock you out" promise:
+#   net.ipv6.conf.*.accept_ra  — would break IPv6 SLAAC on many VPSes
+#   net.ipv4.ip_forward        — would break routers / Docker hosts
+
+# ICMP redirects: don't accept or send them (route injection / MITM).
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+
+# Source-routed packets: legacy feature, only useful for spoofing.
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+
+# Reverse-path filtering: drop packets whose return route doesn't match.
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Log packets with impossible source addresses ("martians").
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# SYN-flood protection and ICMP noise reduction.
+net.ipv4.tcp_syncookies = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+# Kernel info leaks and setuid core dumps.
+kernel.kptr_restrict = 1
+kernel.dmesg_restrict = 1
+fs.suid_dumpable = 0
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s and apply it with sysctl -p\n' "$c_yellow" "$c_reset" "$SYSCTL_DROPIN"
+        return 0
+    fi
+    printf '%s\n' "$content" > "$SYSCTL_DROPIN"
+    chmod 644 "$SYSCTL_DROPIN"
+    # -e ignores keys this kernel doesn't have. In an unprivileged container
+    # some keys are read-only; the file is still in place for the next boot,
+    # so that's a warning, not a failure.
+    if sysctl -e -p "$SYSCTL_DROPIN" >/dev/null 2>&1; then
+        ok "Kernel parameters applied (sysctl)"
+    else
+        warn "Some sysctl keys could not be applied live (container?). They will apply on boot."
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -315,6 +381,7 @@ main() {
     [ "$DO_UFW" -eq 1 ]         && echo "    - UFW: deny incoming, allow $SSH_PORT/tcp ${EXTRA_PORTS[*]:-}"
     [ "$DO_FAIL2BAN" -eq 1 ]    && echo "    - Fail2Ban sshd jail"
     [ "$DO_AUTOUPDATES" -eq 1 ] && echo "    - unattended security upgrades"
+    [ "$DO_SYSCTL" -eq 1 ]      && echo "    - kernel hardening (sysctl drop-in)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -329,6 +396,7 @@ main() {
     setup_ufw
     setup_fail2ban
     setup_autoupdates
+    setup_sysctl
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
