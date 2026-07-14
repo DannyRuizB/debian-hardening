@@ -31,7 +31,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf"
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \

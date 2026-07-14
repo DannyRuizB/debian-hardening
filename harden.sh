@@ -13,6 +13,8 @@
 #   5. Unattended security upgrades.
 #   6. Kernel hardening via sysctl (no ICMP redirects, no source routing,
 #      rp_filter, syncookies, restricted dmesg/kptr).
+#   7. Account policies: password aging in login.defs (max 365 / min 1 /
+#      warn 7) and a 30-day inactivity lock for accounts created from now on.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -29,6 +31,7 @@
 #   --no-fail2ban          skip Fail2Ban
 #   --no-autoupdates       skip unattended-upgrades
 #   --no-sysctl            skip kernel hardening (sysctl)
+#   --no-account-policies  skip password-aging / inactivity policies
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -47,6 +50,7 @@ DO_UFW=1
 DO_FAIL2BAN=1
 DO_AUTOUPDATES=1
 DO_SYSCTL=1
+DO_ACCOUNT_POLICIES=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -91,6 +95,7 @@ parse_args() {
             --no-fail2ban)     DO_FAIL2BAN=0; shift;;
             --no-autoupdates)  DO_AUTOUPDATES=0; shift;;
             --no-sysctl)       DO_SYSCTL=0; shift;;
+            --no-account-policies) DO_ACCOUNT_POLICIES=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -377,6 +382,46 @@ EOF
     fi
 }
 
+setup_account_policies() {
+    [ "$DO_ACCOUNT_POLICIES" -eq 1 ] || { log "Skipping account policies (login.defs)"; return 0; }
+    log "Tightening account policies (password aging + inactivity lock)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would set PASS_MAX_DAYS 365 / PASS_MIN_DAYS 1 / PASS_WARN_AGE 7 in /etc/login.defs, INACTIVE=30 in useradd defaults, and age existing password-holding accounts\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # login.defs: Debian ships these keys active (99999 / 0 / 7) — replace in
+    # place; append if a future image drops one. CIS 5.4.1: max 365, min 1,
+    # warn 7.
+    local spec key val
+    for spec in "PASS_MAX_DAYS 365" "PASS_MIN_DAYS 1" "PASS_WARN_AGE 7"; do
+        key=${spec% *}; val=${spec#* }
+        if grep -qE "^${key}\b" /etc/login.defs; then
+            sed -i -E "s|^${key}\b.*|${key}\t${val}|" /etc/login.defs
+        else
+            printf '%s\t%s\n' "$key" "$val" >> /etc/login.defs
+        fi
+    done
+    # Accounts created from now on get locked 30 days after their password
+    # expires (CIS 5.4.2). Written to /etc/default/useradd.
+    useradd -D -f 30 >/dev/null
+    # Existing accounts that actually hold a password: apply the same aging.
+    # login.defs only affects accounts created later, so without this pass the
+    # policy would be theater on a server with existing users. Two deliberate
+    # exclusions to keep the "won't lock you out" promise:
+    #   - locked/passwordless accounts ("!", "*") are untouched — key-only
+    #     admins (like the one step 1 creates) never see any of this;
+    #   - --inactive is NOT applied to existing accounts: one whose password
+    #     expired more than 30 days ago would be locked ON THE SPOT.
+    local u hash
+    while IFS=: read -r u hash _; do
+        case "$hash" in
+            ''|'!'*|'*') continue;;
+        esac
+        chage --maxdays 365 --mindays 1 --warndays 7 "$u"
+    done < /etc/shadow
+    ok "Account policies set (aging 365/1/7; 30-day inactivity lock for new accounts)"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -389,6 +434,7 @@ main() {
     [ "$DO_FAIL2BAN" -eq 1 ]    && echo "    - Fail2Ban sshd jail"
     [ "$DO_AUTOUPDATES" -eq 1 ] && echo "    - unattended security upgrades"
     [ "$DO_SYSCTL" -eq 1 ]      && echo "    - kernel hardening (sysctl drop-in)"
+    [ "$DO_ACCOUNT_POLICIES" -eq 1 ] && echo "    - account policies (password aging + inactivity lock)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -404,6 +450,7 @@ main() {
     setup_fail2ban
     setup_autoupdates
     setup_sysctl
+    setup_account_policies
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
