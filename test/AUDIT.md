@@ -26,7 +26,8 @@ Score = (PASS + 0.5*WARN) / total * 100
 ```
 
 Categories: SSH authentication (core), SSH hardening extras (CIS), firewall,
-intrusion prevention, patch management, and accounts & files.
+intrusion prevention, patch management, kernel parameters (CIS network), and
+accounts & files.
 
 ## What it caught — and the fix
 
@@ -53,6 +54,16 @@ Idempotence held (the drop-in's hash is unchanged on a second run) and the e2e
 `verify.sh` still passes — the extra directives tighten the config without
 changing key-only behaviour. That's the whole loop:
 **audit → find gaps → remediate → re-audit.**
+
+When the baseline later gained step 6 (kernel hardening via sysctl), the audit
+grew with it: a **Kernel parameters (CIS network)** section now grades seven of
+the keys the drop-in promises (ICMP redirects, source routing, rp_filter, SYN
+cookies, `dmesg_restrict`, `suid_dumpable`). Current score on a freshly
+hardened node:
+
+```
+ Score: 25 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+```
 
 ## Honesty
 
