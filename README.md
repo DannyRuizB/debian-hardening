@@ -35,6 +35,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 | **Kernel (sysctl)** | Drop-in `/etc/sysctl.d/99-hardening.conf`: no ICMP redirects (in or out), no source routing, reverse-path filtering, martian logging, SYN cookies, restricted `dmesg` / kernel pointers, no setuid core dumps. Deliberately leaves `accept_ra` (IPv6 SLAAC on VPSes) and `ip_forward` (routers / Docker hosts) alone. |
 | **Account policies** | Password aging per CIS 5.4 (`PASS_MAX_DAYS 365`, `PASS_MIN_DAYS 1`, `PASS_WARN_AGE 7` in `login.defs`) applied also to existing password-holding accounts, and a 30-day post-expiry inactivity lock for accounts created from now on (`useradd -D -f 30`). Key-only accounts (locked hash — like the admin user step 1 creates) are never touched, and existing accounts don't get the inactivity lock: one whose password expired long ago would be locked on the spot. |
 | **Mount options** | `/dev/shm` remounted — and pinned in `/etc/fstab` — with `nodev,nosuid,noexec` (CIS 1.1.2.2): world-writable shared memory stops being a launchpad for droppers. An existing fstab entry keeps its custom options (`size=`…); only the missing flags are added. `/tmp` is deliberately left alone — a `noexec /tmp` breaks well-behaved installers, and Debian doesn't ship it as a separate mount. |
+| **Warning banners** | CIS 1.7: a fixed legal notice in `/etc/issue`, `/etc/issue.net` and `/etc/motd` — the stock files advertise the exact OS (`Debian GNU/Linux 13 \n \l`) to anyone who connects, before any login. sshd presents it **pre-auth** via its own drop-in (`Banner /etc/issue.net`), validated with `sshd -t` before reload so a bad config never goes live. The warning is also what makes session monitoring legally defensible. |
 
 ### Lockout guard
 
@@ -77,7 +78,7 @@ sudo ./harden.sh \
 --admin-user NAME      create/ensure this sudo user before locking SSH
 --pubkey "ssh-... "    public key to install for --admin-user
 --allow-port N[/proto] extra port to open in UFW (repeatable)
---no-ssh | --no-ufw | --no-fail2ban | --no-autoupdates | --no-sysctl | --no-account-policies | --no-mount-options   skip a step
+--no-ssh | --no-ufw | --no-fail2ban | --no-autoupdates | --no-sysctl | --no-account-policies | --no-mount-options | --no-banners   skip a step
 --no-passwordless-sudo don't grant --admin-user passwordless sudo
 --force-no-password    disable password auth even with no key (DANGEROUS)
 --dry-run              print what would change, do nothing
