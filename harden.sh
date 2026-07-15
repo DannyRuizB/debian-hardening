@@ -15,6 +15,9 @@
 #      rp_filter, syncookies, restricted dmesg/kptr).
 #   7. Account policies: password aging in login.defs (max 365 / min 1 /
 #      warn 7) and a 30-day inactivity lock for accounts created from now on.
+#   8. Mount options: /dev/shm remounted (and pinned in fstab) with
+#      nodev,nosuid,noexec — world-writable shared memory stops being a
+#      launchpad for droppers.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -32,6 +35,7 @@
 #   --no-autoupdates       skip unattended-upgrades
 #   --no-sysctl            skip kernel hardening (sysctl)
 #   --no-account-policies  skip password-aging / inactivity policies
+#   --no-mount-options     skip /dev/shm mount hardening
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -51,6 +55,7 @@ DO_FAIL2BAN=1
 DO_AUTOUPDATES=1
 DO_SYSCTL=1
 DO_ACCOUNT_POLICIES=1
+DO_MOUNT_OPTIONS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -79,7 +84,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -96,6 +101,7 @@ parse_args() {
             --no-autoupdates)  DO_AUTOUPDATES=0; shift;;
             --no-sysctl)       DO_SYSCTL=0; shift;;
             --no-account-policies) DO_ACCOUNT_POLICIES=0; shift;;
+            --no-mount-options) DO_MOUNT_OPTIONS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -422,6 +428,71 @@ setup_account_policies() {
     ok "Account policies set (aging 365/1/7; 30-day inactivity lock for new accounts)"
 }
 
+setup_mount_options() {
+    [ "$DO_MOUNT_OPTIONS" -eq 1 ] || { log "Skipping mount options (/dev/shm)"; return 0; }
+    log "Hardening /dev/shm mount options (nodev,nosuid,noexec)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would pin /dev/shm in /etc/fstab with nodev,nosuid,noexec and remount it live\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # /dev/shm is world-writable by design — any user or compromised service
+    # can write there. With exec/suid/dev allowed it's the classic staging
+    # ground for droppers (CIS 1.1.2.2). Only /dev/shm is touched: /tmp is
+    # deliberately left alone because a noexec /tmp breaks well-behaved
+    # installers, and Debian doesn't ship it as a separate mount anyway.
+
+    # fstab: Debian normally has NO /dev/shm entry (systemd mounts it), so the
+    # options must be pinned to survive reboots. If an entry already exists,
+    # only its options field is edited — a custom size= or quota stays intact.
+    if grep -qE '^[^#[:space:]]+[[:space:]]+/dev/shm[[:space:]]' /etc/fstab; then
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            $1 !~ /^#/ && $2 == "/dev/shm" {
+                n = split($4, have, ",")
+                for (i = 1; i <= n; i++) seen[have[i]] = 1
+                split("nodev,nosuid,noexec", want, ",")
+                for (i = 1; i <= 3; i++) if (!seen[want[i]]) $4 = $4 "," want[i]
+                delete seen
+                if ($5 == "") $5 = "0"
+                if ($6 == "") $6 = "0"
+                print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6
+                next
+            }
+            { print }
+        ' /etc/fstab > "$tmp"
+        if cmp -s "$tmp" /etc/fstab; then
+            ok "fstab entry for /dev/shm already has nodev,nosuid,noexec"
+            rm -f "$tmp"
+        else
+            install -m 644 -o root -g root "$tmp" /etc/fstab
+            rm -f "$tmp"
+            ok "Added missing options to the existing /dev/shm fstab entry"
+        fi
+    else
+        printf 'tmpfs\t/dev/shm\ttmpfs\tdefaults,nodev,nosuid,noexec\t0\t0\n' >> /etc/fstab
+        ok "Pinned /dev/shm in /etc/fstab with nodev,nosuid,noexec"
+    fi
+
+    # Live remount, only if something is actually missing (keeps idempotence
+    # honest: a second pass must not touch the mount table).
+    if mountpoint -q /dev/shm; then
+        local opts o missing=0
+        opts=$(findmnt -no OPTIONS /dev/shm)
+        for o in nodev nosuid noexec; do
+            case ",$opts," in *",$o,"*) ;; *) missing=1;; esac
+        done
+        if [ "$missing" -eq 1 ]; then
+            run mount -o remount,nodev,nosuid,noexec /dev/shm
+            ok "Remounted /dev/shm with nodev,nosuid,noexec"
+        else
+            ok "/dev/shm already mounted with nodev,nosuid,noexec"
+        fi
+    else
+        warn "/dev/shm is not a mountpoint here — fstab pinned, nothing to remount"
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -435,6 +506,7 @@ main() {
     [ "$DO_AUTOUPDATES" -eq 1 ] && echo "    - unattended security upgrades"
     [ "$DO_SYSCTL" -eq 1 ]      && echo "    - kernel hardening (sysctl drop-in)"
     [ "$DO_ACCOUNT_POLICIES" -eq 1 ] && echo "    - account policies (password aging + inactivity lock)"
+    [ "$DO_MOUNT_OPTIONS" -eq 1 ]    && echo "    - mount options (/dev/shm nodev,nosuid,noexec)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -451,6 +523,7 @@ main() {
     setup_autoupdates
     setup_sysctl
     setup_account_policies
+    setup_mount_options
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
