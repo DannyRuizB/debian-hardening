@@ -107,6 +107,24 @@ on_node sudo userdel probe-aging 2>/dev/null || true
 expect_line "the key-only admin account is not aged (locked hash untouched)" "^[!*]" \
   sudo bash -c "'getent shadow opsadmin | cut -d: -f2'"
 
+echo "== Mount options (/dev/shm) =="
+expect_line "fstab pins /dev/shm with nodev,nosuid,noexec" \
+  "nodev,nosuid,noexec" \
+  grep -E "'^[^#].*[[:space:]]/dev/shm[[:space:]]'" /etc/fstab
+expect_line "/dev/shm is live-mounted nodev" ",nodev,|,nodev$|^nodev," findmnt -no OPTIONS /dev/shm
+expect_line "/dev/shm is live-mounted nosuid" ",nosuid,|,nosuid$|^nosuid," findmnt -no OPTIONS /dev/shm
+expect_line "/dev/shm is live-mounted noexec" ",noexec,|,noexec$|^noexec," findmnt -no OPTIONS /dev/shm
+# Functional, not just the mount table: drop a real binary into /dev/shm and
+# try to run it — the kernel must refuse (Permission denied), exactly what a
+# dropper staging its payload there would hit.
+on_node cp /bin/true /dev/shm/db-harden-probe 2>/dev/null || true
+if on_node /dev/shm/db-harden-probe >/dev/null 2>&1; then
+  fail "a binary staged in /dev/shm cannot execute (noexec enforced)"
+else
+  pass "a binary staged in /dev/shm cannot execute (noexec enforced)"
+fi
+on_node rm -f /dev/shm/db-harden-probe 2>/dev/null || true
+
 # LAST on purpose: banning the client cuts our own SSH access to the node.
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
