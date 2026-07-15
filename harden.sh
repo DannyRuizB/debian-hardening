@@ -18,6 +18,8 @@
 #   8. Mount options: /dev/shm remounted (and pinned in fstab) with
 #      nodev,nosuid,noexec — world-writable shared memory stops being a
 #      launchpad for droppers.
+#   9. Warning banners (CIS 1.7): legal notice in /etc/issue, /etc/issue.net
+#      and /etc/motd (no OS/kernel leak), presented by sshd BEFORE login.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -36,6 +38,7 @@
 #   --no-sysctl            skip kernel hardening (sysctl)
 #   --no-account-policies  skip password-aging / inactivity policies
 #   --no-mount-options     skip /dev/shm mount hardening
+#   --no-banners           skip warning banners
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -56,6 +59,7 @@ DO_AUTOUPDATES=1
 DO_SYSCTL=1
 DO_ACCOUNT_POLICIES=1
 DO_MOUNT_OPTIONS=1
+DO_BANNERS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -84,7 +88,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -102,6 +106,7 @@ parse_args() {
             --no-sysctl)       DO_SYSCTL=0; shift;;
             --no-account-policies) DO_ACCOUNT_POLICIES=0; shift;;
             --no-mount-options) DO_MOUNT_OPTIONS=0; shift;;
+            --no-banners)      DO_BANNERS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -493,6 +498,53 @@ setup_mount_options() {
     fi
 }
 
+setup_banners() {
+    [ "$DO_BANNERS" -eq 1 ] || { log "Skipping warning banners"; return 0; }
+    log "Installing pre-auth warning banners (CIS 1.7)"
+    local banner="Authorized access only. All activity may be monitored and reported."
+    local sshd_banner_dropin="/etc/ssh/sshd_config.d/98-banner.conf"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write the legal banner to /etc/issue, /etc/issue.net and /etc/motd, and point sshd Banner at /etc/issue.net\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # The stock files advertise the exact OS ("Debian GNU/Linux 13 \n \l"),
+    # handing pre-auth reconnaissance to anyone who connects. Replace all
+    # three with a fixed legal notice: no \m \r \s \v escapes, no OS name —
+    # and the warning itself is what makes monitoring legally defensible.
+    local f
+    for f in /etc/issue /etc/issue.net /etc/motd; do
+        if [ "$(cat "$f" 2>/dev/null)" = "$banner" ]; then
+            ok "$f already carries the banner"
+        else
+            printf '%s\n' "$banner" > "$f"
+            chown root:root "$f"
+            chmod 644 "$f"
+            ok "Banner written to $f"
+        fi
+    done
+    # sshd shows /etc/issue.net BEFORE authentication. Own drop-in (not the
+    # step-2 one, so --no-ssh and --no-banners stay independent), validated
+    # with sshd -t before reloading — a bad config must never go live.
+    if ! command -v sshd >/dev/null 2>&1; then
+        warn "sshd not installed — banner files written, ssh Banner skipped"
+        return 0
+    fi
+    if [ -f "$sshd_banner_dropin" ] && grep -qxF "Banner /etc/issue.net" "$sshd_banner_dropin"; then
+        ok "sshd already presents the banner before login"
+    else
+        printf 'Banner /etc/issue.net\n' > "$sshd_banner_dropin"
+        chmod 644 "$sshd_banner_dropin"
+        if sshd -t 2>/dev/null; then
+            systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+            ok "sshd now presents the banner before authentication"
+        else
+            rm -f "$sshd_banner_dropin"
+            err "sshd config validation failed after adding the banner — reverted"
+            return 1
+        fi
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -507,6 +559,7 @@ main() {
     [ "$DO_SYSCTL" -eq 1 ]      && echo "    - kernel hardening (sysctl drop-in)"
     [ "$DO_ACCOUNT_POLICIES" -eq 1 ] && echo "    - account policies (password aging + inactivity lock)"
     [ "$DO_MOUNT_OPTIONS" -eq 1 ]    && echo "    - mount options (/dev/shm nodev,nosuid,noexec)"
+    [ "$DO_BANNERS" -eq 1 ]          && echo "    - warning banners (issue/issue.net/motd + sshd Banner)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -524,6 +577,7 @@ main() {
     setup_sysctl
     setup_account_policies
     setup_mount_options
+    setup_banners
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
