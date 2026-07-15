@@ -20,6 +20,8 @@
 #      launchpad for droppers.
 #   9. Warning banners (CIS 1.7): legal notice in /etc/issue, /etc/issue.net
 #      and /etc/motd (no OS/kernel leak), presented by sshd BEFORE login.
+#  10. Sudo hardening (CIS 5.3): use_pty (commands run in their own pty)
+#      and a dedicated /var/log/sudo.log, via a visudo-validated drop-in.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -39,6 +41,7 @@
 #   --no-account-policies  skip password-aging / inactivity policies
 #   --no-mount-options     skip /dev/shm mount hardening
 #   --no-banners           skip warning banners
+#   --no-sudo-hardening    skip sudo use_pty / logfile
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -60,6 +63,7 @@ DO_SYSCTL=1
 DO_ACCOUNT_POLICIES=1
 DO_MOUNT_OPTIONS=1
 DO_BANNERS=1
+DO_SUDO_HARDENING=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -88,7 +92,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -107,6 +111,7 @@ parse_args() {
             --no-account-policies) DO_ACCOUNT_POLICIES=0; shift;;
             --no-mount-options) DO_MOUNT_OPTIONS=0; shift;;
             --no-banners)      DO_BANNERS=0; shift;;
+            --no-sudo-hardening) DO_SUDO_HARDENING=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -545,6 +550,40 @@ setup_banners() {
     fi
 }
 
+setup_sudo_hardening() {
+    [ "$DO_SUDO_HARDENING" -eq 1 ] || { log "Skipping sudo hardening"; return 0; }
+    log "Hardening sudo (use_pty + dedicated log, CIS 5.3)"
+    local dropin="/etc/sudoers.d/99-hardening-sudo"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s: Defaults use_pty + Defaults logfile=/var/log/sudo.log\n' "$c_yellow" "$c_reset" "$dropin"
+        return 0
+    fi
+    # use_pty (CIS 5.3.2): every sudo command gets its own pseudo-terminal,
+    # so a malicious command can't inject keystrokes into the calling
+    # session's tty once sudo exits. logfile (CIS 5.3.3): sudo activity in
+    # one dedicated file instead of scattered through auth.log — the first
+    # thing a forensics pass wants. Validated with visudo before it goes
+    # live, same as the admin-user rule: a bad drop-in can never break sudo.
+    local content
+    content=$(printf 'Defaults use_pty\nDefaults logfile="/var/log/sudo.log"\n')
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$content" ]; then
+        ok "sudo hardening drop-in already in place"
+        return 0
+    fi
+    local tmp
+    tmp=$(mktemp)
+    printf '%s\n' "$content" > "$tmp"
+    if visudo -cf "$tmp" >/dev/null 2>&1; then
+        install -m 440 -o root -g root "$tmp" "$dropin"
+        rm -f "$tmp"
+        ok "sudo now runs commands in their own pty and logs to /var/log/sudo.log"
+    else
+        rm -f "$tmp"
+        err "Generated sudoers drop-in failed visudo validation — not installing"
+        return 1
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -560,6 +599,7 @@ main() {
     [ "$DO_ACCOUNT_POLICIES" -eq 1 ] && echo "    - account policies (password aging + inactivity lock)"
     [ "$DO_MOUNT_OPTIONS" -eq 1 ]    && echo "    - mount options (/dev/shm nodev,nosuid,noexec)"
     [ "$DO_BANNERS" -eq 1 ]          && echo "    - warning banners (issue/issue.net/motd + sshd Banner)"
+    [ "$DO_SUDO_HARDENING" -eq 1 ]   && echo "    - sudo hardening (use_pty + /var/log/sudo.log)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -578,6 +618,7 @@ main() {
     setup_account_policies
     setup_mount_options
     setup_banners
+    setup_sudo_hardening
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

@@ -28,7 +28,7 @@ Score = (PASS + 0.5*WARN) / total * 100
 Categories: SSH authentication (core), SSH hardening extras (CIS), firewall,
 intrusion prevention, patch management, kernel parameters (CIS network),
 account policies (CIS), filesystem mount options (CIS), warning banners (CIS),
-and accounts & files.
+sudo hardening (CIS), and accounts & files.
 
 ## What it caught — and the fix
 
@@ -67,10 +67,12 @@ a **Filesystem mount options (CIS)** section with four more: `/dev/shm` mounted
 a reboot. Step 9 (warning banners) added a **Warning banners (CIS 1.7)** section
 with four more: sshd presents a pre-auth banner, `/etc/issue` and
 `/etc/issue.net` leak no OS/kernel info, and the banner file permissions are
-sane. Current score on a freshly hardened node:
+sane. Step 10 (sudo hardening) added a **Sudo hardening (CIS 5.3)** section
+with four more: sudo installed, `use_pty`, the dedicated logfile, and the
+drop-in's permissions. Current score on a freshly hardened node:
 
 ```
- Score: 37 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 41 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty
