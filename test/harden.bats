@@ -49,8 +49,8 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
 }
 
 @test "the per-step --no-* flags each set their toggle to 0" {
-  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS\""
-  [ "$output" = "0 0 0 0 0 0 0 0" ]
+  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING\""
+  [ "$output" = "0 0 0 0 0 0 0 0 0" ]
 }
 
 @test "--allow-port accumulates into EXTRA_PORTS" {
