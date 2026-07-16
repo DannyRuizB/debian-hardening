@@ -14,6 +14,10 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"--ssh-port"* ]]
   [[ "$output" == *"--no-passwordless-sudo"* ]]
+  # The help is a sed range over the header — these two catch it going stale
+  # when options are added (the range cut off the tail once already).
+  [[ "$output" == *"--no-ssh-policies"* ]]
+  [[ "$output" == *"-h, --help"* ]]
 }
 
 @test "an unknown option is rejected with a message and non-zero exit" {
@@ -49,8 +53,8 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
 }
 
 @test "the per-step --no-* flags each set their toggle to 0" {
-  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING\""
-  [ "$output" = "0 0 0 0 0 0 0 0 0" ]
+  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening --no-ssh-policies; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING \$DO_SSH_POLICIES\""
+  [ "$output" = "0 0 0 0 0 0 0 0 0 0" ]
 }
 
 @test "--allow-port accumulates into EXTRA_PORTS" {

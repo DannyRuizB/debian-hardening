@@ -99,6 +99,18 @@ got=$(val s6 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s6 >/dev/null 2>&1
 
+echo "-- 7. Skip a step: --no-ssh-policies -----------------------"
+fresh_node s7 >/dev/null
+docker exec s7 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ssh-policies -y >/dev/null 2>&1
+got=$(val s7 allowtcpforwarding)
+[ "$got" = yes ] && P "--no-ssh-policies -> TCP forwarding left at its default (yes)" \
+                 || F "--no-ssh-policies should leave forwarding alone" "$got"
+# ...and the default run does lock it down:
+got=$(val s7 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s7 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
