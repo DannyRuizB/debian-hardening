@@ -24,8 +24,9 @@ cd test
 | 4 | `--ssh-port 2244` | `sshd` listens on 2244 **and** UFW allows 2244 (they stay in sync) |
 | 5 | `--allow-port 80/tcp` | UFW opens the extra port |
 | 6 | `--no-fail2ban` | Fail2Ban is skipped, but the rest of the baseline still applies |
+| 7 | `--no-ssh-policies` | session policies skipped (TCP forwarding stays at its default), the rest still applies |
 
-**Result: 8/8 checks pass.**
+**Result: 10/10 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
