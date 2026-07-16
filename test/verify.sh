@@ -34,6 +34,15 @@ expect_line() {
   if on_node "$@" 2>/dev/null | grep -E -q "$regex"; then pass "$desc"; else fail "$desc"; fi
 }
 
+# With LogLevel VERBOSE (step 11) every deliberately-failed probe below
+# (root login, the pre-auth banner check) is worth SEVERAL journal lines to
+# fail2ban — enough to land a mid-run ban long before the final section
+# tests banning on purpose (the sibling Ansible repo's CI caught it; here it
+# was a race with fail2ban's journal poll). Shield this client while the
+# functional checks run; the shield is lifted right before the ban test.
+# ignoreip means the probes are never counted, so it still starts from zero.
+docker exec db-harden-node fail2ban-client set sshd addignoreip 172.17.0.1 >/dev/null 2>&1 || true
+
 echo "== Won't lock you out =="
 expect_ok "admin user logs in with their key" true
 expect_ok "admin user has passwordless sudo" sudo -n true
@@ -203,6 +212,8 @@ expect_line "auth log records the key fingerprint of our login" \
   sudo sh -c '"journalctl -u ssh --no-pager 2>/dev/null | grep \"Accepted publickey\" | tail -3 || true"'
 
 # LAST on purpose: banning the client cuts our own SSH access to the node.
+# Lift the shield installed at the top — from here on we WANT to be bannable.
+docker exec db-harden-node fail2ban-client set sshd delignoreip 172.17.0.1 >/dev/null 2>&1 || true
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
 # few attempts right after a (re)start while it catches up with the journal, so
