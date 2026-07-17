@@ -123,6 +123,18 @@ got=$(val s8 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s8 >/dev/null 2>&1
 
+echo "-- 9. Skip a step: --no-umask-tmout ------------------------"
+fresh_node s9 >/dev/null
+docker exec s9 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-umask-tmout -y >/dev/null 2>&1
+if docker exec s9 test -f /etc/profile.d/99-hardening-tmout.sh 2>/dev/null; then
+  F "--no-umask-tmout should not write the TMOUT drop-in" "file exists"; else
+  P "--no-umask-tmout -> no umask/TMOUT drop-ins"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s9 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s9 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
