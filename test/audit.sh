@@ -198,6 +198,20 @@ sudoers_perm=$(on_node stat -c '%a' /etc/sudoers.d/99-hardening-sudo 2>/dev/null
   && P "sudo drop-in permissions sane (440)" \
   || W "sudo drop-in is ${sudoers_perm:-absent}" "install -m 440 (sudo hardening step)"
 
+echo "-- Core dumps (CIS 1.5) -------------------------------------"
+on_node grep -rqE '^\*[[:space:]]+hard[[:space:]]+core[[:space:]]+0' /etc/security/limits.conf /etc/security/limits.d \
+  && P "hard core limit 0 for all users" \
+  || W "no '* hard core 0' limit" "add a limits.d drop-in (core dump step)"
+on_node grep -rqE '^root[[:space:]]+hard[[:space:]]+core[[:space:]]+0' /etc/security/limits.conf /etc/security/limits.d \
+  && P "root has its own hard core 0 line ('*' never matches root)" \
+  || W "root can still dump core" "add 'root hard core 0' (core dump step)"
+on_node grep -rqsE '^Storage=none' /etc/systemd/coredump.conf /etc/systemd/coredump.conf.d \
+  && P "systemd-coredump storage disabled (Storage=none)" \
+  || W "systemd-coredump would still store dumps" "set Storage=none (core dump step)"
+on_node grep -rqsE '^ProcessSizeMax=0' /etc/systemd/coredump.conf /etc/systemd/coredump.conf.d \
+  && P "systemd-coredump processing capped (ProcessSizeMax=0)" \
+  || W "systemd-coredump would still process dumps" "set ProcessSizeMax=0 (core dump step)"
+
 echo "-- Accounts & files -----------------------------------------"
 on_node getent group sudo | grep -qE ':.*[a-z]' \
   && P "A non-root sudo account exists ($(on_node getent group sudo | sed 's/.*://'))" \

@@ -25,6 +25,10 @@
 #  11. SSH session policies (CIS 5.2): what an authenticated session may do —
 #      no TCP/agent forwarding, session/connection caps, verbose logging,
 #      no user environment / rhosts / empty passwords. Own drop-in.
+#  12. Core dump limits (CIS 1.5): hard core 0 for every account via a
+#      limits.d drop-in (root gets its own line — '*' never matches root)
+#      and systemd-coredump capped off (Storage=none), so a crashed
+#      process can't leave its memory (keys, passwords) on disk.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -46,6 +50,7 @@
 #   --no-banners           skip warning banners
 #   --no-sudo-hardening    skip sudo use_pty / logfile
 #   --no-ssh-policies      skip SSH session policies (forwarding, caps, ...)
+#   --no-coredump-limits   skip core dump limits (hard core 0)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -69,6 +74,7 @@ DO_MOUNT_OPTIONS=1
 DO_BANNERS=1
 DO_SUDO_HARDENING=1
 DO_SSH_POLICIES=1
+DO_COREDUMP_LIMITS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -97,7 +103,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -118,6 +124,7 @@ parse_args() {
             --no-banners)      DO_BANNERS=0; shift;;
             --no-sudo-hardening) DO_SUDO_HARDENING=0; shift;;
             --no-ssh-policies) DO_SSH_POLICIES=0; shift;;
+            --no-coredump-limits) DO_COREDUMP_LIMITS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -650,6 +657,50 @@ EOF
     fi
 }
 
+setup_coredump_limits() {
+    [ "$DO_COREDUMP_LIMITS" -eq 1 ] || { log "Skipping core dump limits"; return 0; }
+    log "Disabling core dumps (CIS 1.5)"
+    # A core dump is the crashed process's memory written to disk: keys,
+    # passwords, session tokens — everything it held at the moment it died.
+    # Three doors, three locks: the ulimit door closes here (hard = the
+    # session can't raise it back; '*' never matches root, so root gets its
+    # own line), the systemd-coredump door gets Storage=none in case that
+    # collector is ever installed (it bypasses ulimit entirely), and the
+    # setuid door (fs.suid_dumpable=0) is already locked by the sysctl step.
+    local dropin="/etc/security/limits.d/99-hardening-coredumps.conf"
+    local cdropin="/etc/systemd/coredump.conf.d/99-hardening.conf"
+    local content ccontent
+    content=$(cat <<'EOF'
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+*    hard    core    0
+root hard    core    0
+EOF
+)
+    ccontent=$(cat <<'EOF'
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s (hard core 0, root included)\n' "$c_yellow" "$c_reset" "$dropin"
+        printf '    %s(dry-run)%s would write %s (Storage=none, ProcessSizeMax=0)\n' "$c_yellow" "$c_reset" "$cdropin"
+        return 0
+    fi
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$content" ] &&
+       [ -f "$cdropin" ] && [ "$(cat "$cdropin")" = "$ccontent" ]; then
+        ok "core dump limits already in place"
+        return 0
+    fi
+    install -d -m 755 /etc/security/limits.d /etc/systemd/coredump.conf.d
+    printf '%s\n' "$content" > "$dropin"
+    chmod 644 "$dropin"
+    printf '%s\n' "$ccontent" > "$cdropin"
+    chmod 644 "$cdropin"
+    ok "core dumps disabled: hard limit 0 for every session, systemd-coredump storage off"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -667,6 +718,7 @@ main() {
     [ "$DO_BANNERS" -eq 1 ]          && echo "    - warning banners (issue/issue.net/motd + sshd Banner)"
     [ "$DO_SUDO_HARDENING" -eq 1 ]   && echo "    - sudo hardening (use_pty + /var/log/sudo.log)"
     [ "$DO_SSH_POLICIES" -eq 1 ]     && echo "    - SSH session policies (no forwarding, caps, verbose log)"
+    [ "$DO_COREDUMP_LIMITS" -eq 1 ]  && echo "    - core dump limits (hard core 0 + systemd-coredump off)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -687,6 +739,7 @@ main() {
     setup_banners
     setup_sudo_hardening
     setup_ssh_policies
+    setup_coredump_limits
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
