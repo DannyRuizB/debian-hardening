@@ -26,8 +26,9 @@ cd test
 | 6 | `--no-fail2ban` | Fail2Ban is skipped, but the rest of the baseline still applies |
 | 7 | `--no-ssh-policies` | session policies skipped (TCP forwarding stays at its default), the rest still applies |
 | 8 | `--no-coredump-limits` | core dump limits skipped (no limits.d drop-in), the rest still applies |
+| 9 | `--no-umask-tmout` | umask / TMOUT drop-ins skipped, the rest still applies |
 
-**Result: 12/12 checks pass.**
+**Result: 14/14 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

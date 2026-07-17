@@ -75,11 +75,14 @@ policies (CIS 5.2)** section with eight more: TCP and agent forwarding off,
 no host-based auth, rhosts ignored. Step 12 (core dump limits) added a
 **Core dumps (CIS 1.5)** section with four more: `* hard core 0` and root's
 own `hard core 0` line (`*` never matches root), plus systemd-coredump capped
-off (`Storage=none`, `ProcessSizeMax=0`). Current score on a freshly hardened
-node:
+off (`Storage=none`, `ProcessSizeMax=0`). Step 13 (umask & shell timeout)
+added an **Umask & shell timeout (CIS 5.4)** section with four more:
+`UMASK 027` in login.defs, the profile.d umask drop-in, a readonly
+`TMOUT` at or under 900 seconds, and its export. Current score on a freshly
+hardened node:
 
 ```
- Score: 53 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 57 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty

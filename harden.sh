@@ -29,6 +29,10 @@
 #      limits.d drop-in (root gets its own line — '*' never matches root)
 #      and systemd-coredump capped off (Storage=none), so a crashed
 #      process can't leave its memory (keys, passwords) on disk.
+#  13. Default umask & shell timeout (CIS 5.4): umask 027 in login.defs
+#      (pam_umask) plus a profile.d drop-in for login shells, and an idle
+#      timeout — readonly TMOUT=900 — so new files aren't group-writable
+#      and walked-away-from sessions close themselves.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -51,6 +55,7 @@
 #   --no-sudo-hardening    skip sudo use_pty / logfile
 #   --no-ssh-policies      skip SSH session policies (forwarding, caps, ...)
 #   --no-coredump-limits   skip core dump limits (hard core 0)
+#   --no-umask-tmout       skip default umask 027 / TMOUT shell timeout
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -75,6 +80,7 @@ DO_BANNERS=1
 DO_SUDO_HARDENING=1
 DO_SSH_POLICIES=1
 DO_COREDUMP_LIMITS=1
+DO_UMASK_TMOUT=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -103,7 +109,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -125,6 +131,7 @@ parse_args() {
             --no-sudo-hardening) DO_SUDO_HARDENING=0; shift;;
             --no-ssh-policies) DO_SSH_POLICIES=0; shift;;
             --no-coredump-limits) DO_COREDUMP_LIMITS=0; shift;;
+            --no-umask-tmout)  DO_UMASK_TMOUT=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -701,6 +708,55 @@ EOF
     ok "core dumps disabled: hard limit 0 for every session, systemd-coredump storage off"
 }
 
+setup_umask_tmout() {
+    [ "$DO_UMASK_TMOUT" -eq 1 ] || { log "Skipping umask & shell timeout"; return 0; }
+    log "Setting default umask 027 and shell timeout (CIS 5.4)"
+    # umask 022 (the stock default) makes every new file world-readable —
+    # logs, dumps, home directories. 027 keeps group read but shuts the
+    # world out. Two doors: login.defs (pam_umask applies it to every PAM
+    # session where enabled) and a profile.d drop-in (login shells source
+    # it even where pam_umask is absent). TMOUT closes the third classic
+    # gap: the unlocked terminal someone walked away from — readonly so
+    # the session can't simply unset it.
+    local umask_dropin="/etc/profile.d/99-hardening-umask.sh"
+    local tmout_dropin="/etc/profile.d/99-hardening-tmout.sh"
+    local umask_content tmout_content
+    umask_content=$(cat <<'EOF'
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+umask 027
+EOF
+)
+    tmout_content=$(cat <<'EOF'
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+# Idle interactive shells log out after 15 minutes. readonly so the
+# session cannot unset or raise it.
+readonly TMOUT=900
+export TMOUT
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would set UMASK 027 in /etc/login.defs\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would write %s (umask 027) and %s (readonly TMOUT=900)\n' "$c_yellow" "$c_reset" "$umask_dropin" "$tmout_dropin"
+        return 0
+    fi
+    # login.defs ships an UMASK line — replace it in place; append if a
+    # future image drops it. Same pattern as the account-policies step.
+    if grep -qE '^UMASK[[:space:]]' /etc/login.defs; then
+        sed -i 's/^UMASK[[:space:]].*/UMASK\t\t027/' /etc/login.defs
+    else
+        printf 'UMASK\t\t027\n' >> /etc/login.defs
+    fi
+    if [ -f "$umask_dropin" ] && [ "$(cat "$umask_dropin")" = "$umask_content" ] &&
+       [ -f "$tmout_dropin" ] && [ "$(cat "$tmout_dropin")" = "$tmout_content" ]; then
+        ok "umask & shell timeout already in place"
+        return 0
+    fi
+    printf '%s\n' "$umask_content" > "$umask_dropin"
+    printf '%s\n' "$tmout_content" > "$tmout_dropin"
+    chmod 644 "$umask_dropin" "$tmout_dropin"
+    ok "new files default to umask 027; idle shells close after 15 minutes (readonly TMOUT)"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -719,6 +775,7 @@ main() {
     [ "$DO_SUDO_HARDENING" -eq 1 ]   && echo "    - sudo hardening (use_pty + /var/log/sudo.log)"
     [ "$DO_SSH_POLICIES" -eq 1 ]     && echo "    - SSH session policies (no forwarding, caps, verbose log)"
     [ "$DO_COREDUMP_LIMITS" -eq 1 ]  && echo "    - core dump limits (hard core 0 + systemd-coredump off)"
+    [ "$DO_UMASK_TMOUT" -eq 1 ]      && echo "    - default umask 027 + shell timeout (readonly TMOUT=900)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -740,6 +797,7 @@ main() {
     setup_sudo_hardening
     setup_ssh_policies
     setup_coredump_limits
+    setup_umask_tmout
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
