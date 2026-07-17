@@ -111,6 +111,18 @@ got=$(val s7 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s7 >/dev/null 2>&1
 
+echo "-- 8. Skip a step: --no-coredump-limits --------------------"
+fresh_node s8 >/dev/null
+docker exec s8 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-coredump-limits -y >/dev/null 2>&1
+if docker exec s8 test -f /etc/security/limits.d/99-hardening-coredumps.conf 2>/dev/null; then
+  F "--no-coredump-limits should not write the limits drop-in" "file exists"; else
+  P "--no-coredump-limits -> no core-dump limits drop-in"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s8 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s8 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
