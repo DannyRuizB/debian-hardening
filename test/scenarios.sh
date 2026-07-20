@@ -135,6 +135,18 @@ got=$(val s9 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s9 >/dev/null 2>&1
 
+echo "-- 10. Skip a step: --no-cron-restrictions -----------------"
+fresh_node s10 >/dev/null
+docker exec s10 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-cron-restrictions -y >/dev/null 2>&1
+if docker exec s10 test -f /etc/cron.allow 2>/dev/null; then
+  F "--no-cron-restrictions should not write cron.allow" "file exists"; else
+  P "--no-cron-restrictions -> no cron.allow / spool changes"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s10 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s10 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
