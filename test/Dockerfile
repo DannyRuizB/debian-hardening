@@ -10,7 +10,7 @@ ENV container=docker
 # fail2ban and unattended-upgrades, so the node needs to resolve packages.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       systemd systemd-sysv openssh-server sudo ca-certificates procps iproute2
+       systemd systemd-sysv openssh-server sudo ca-certificates procps iproute2 cron
 
 EXPOSE 22
 

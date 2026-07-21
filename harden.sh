@@ -33,6 +33,10 @@
 #      (pam_umask) plus a profile.d drop-in for login shells, and an idle
 #      timeout — readonly TMOUT=900 — so new files aren't group-writable
 #      and walked-away-from sessions close themselves.
+#  14. Cron restrictions (CIS 5.1): /etc/crontab and the cron.* drop-in
+#      directories become root-only, and crontab/at switch from Debian's
+#      deny-list model to an allow-list with just root — unprivileged
+#      users can't schedule jobs (persistence 101) or read root's.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -56,6 +60,7 @@
 #   --no-ssh-policies      skip SSH session policies (forwarding, caps, ...)
 #   --no-coredump-limits   skip core dump limits (hard core 0)
 #   --no-umask-tmout       skip default umask 027 / TMOUT shell timeout
+#   --no-cron-restrictions skip cron/at allow-list + spool permissions
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -81,6 +86,7 @@ DO_SUDO_HARDENING=1
 DO_SSH_POLICIES=1
 DO_COREDUMP_LIMITS=1
 DO_UMASK_TMOUT=1
+DO_CRON_RESTRICTIONS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -109,7 +115,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -132,6 +138,7 @@ parse_args() {
             --no-ssh-policies) DO_SSH_POLICIES=0; shift;;
             --no-coredump-limits) DO_COREDUMP_LIMITS=0; shift;;
             --no-umask-tmout)  DO_UMASK_TMOUT=0; shift;;
+            --no-cron-restrictions) DO_CRON_RESTRICTIONS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -757,6 +764,62 @@ EOF
     ok "new files default to umask 027; idle shells close after 15 minutes (readonly TMOUT)"
 }
 
+setup_cron_restrictions() {
+    [ "$DO_CRON_RESTRICTIONS" -eq 1 ] || { log "Skipping cron restrictions"; return 0; }
+    log "Restricting cron/at to root (CIS 5.1)"
+    # Scheduled jobs are persistence 101: a foothold that re-runs itself
+    # survives reboots and cleanups. Two moves. First, tighten the spool —
+    # /etc/crontab and the cron.* drop-in dirs are world-readable by
+    # default, leaking commands, paths and timings to any local user.
+    # Second, switch crontab/at from Debian's deny-list model (everyone
+    # may schedule unless listed in cron.deny) to an allow-list with just
+    # root. Existing user crontabs keep RUNNING — the allow-list gates
+    # the crontab(1) command, not the daemon — so nothing already
+    # deployed breaks; unprivileged users just can't schedule anew.
+    if [ ! -f /etc/crontab ]; then
+        warn "cron does not seem to be installed — skipping cron restrictions"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would chmod 600 /etc/crontab and 700 the cron.* directories\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would write a root-only /etc/cron.allow and remove /etc/cron.deny (same for at, if present)\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    local changed=0 d
+    if [ "$(stat -c '%a %U %G' /etc/crontab)" != "600 root root" ]; then
+        chown root:root /etc/crontab; chmod 600 /etc/crontab; changed=1
+    fi
+    for d in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /etc/cron.d; do
+        [ -d "$d" ] || continue
+        if [ "$(stat -c '%a %U %G' "$d")" != "700 root root" ]; then
+            chown root:root "$d"; chmod 700 "$d"; changed=1
+        fi
+    done
+    if [ ! -f /etc/cron.allow ]; then
+        printf 'root\n' > /etc/cron.allow; changed=1
+    elif ! grep -qx 'root' /etc/cron.allow; then
+        # An admin-curated allow-list is respected — just make sure root is on it.
+        printf 'root\n' >> /etc/cron.allow; changed=1
+    fi
+    if [ "$(stat -c '%a %U %G' /etc/cron.allow)" != "640 root root" ]; then
+        chown root:root /etc/cron.allow; chmod 640 /etc/cron.allow; changed=1
+    fi
+    if [ -e /etc/cron.deny ]; then rm -f /etc/cron.deny; changed=1; fi
+    # at ships separately; give it the same allow-list only if it's around.
+    if command -v at >/dev/null 2>&1 || [ -e /etc/at.deny ]; then
+        if [ ! -f /etc/at.allow ]; then printf 'root\n' > /etc/at.allow; changed=1; fi
+        if [ "$(stat -c '%a %U %G' /etc/at.allow)" != "640 root root" ]; then
+            chown root:root /etc/at.allow; chmod 640 /etc/at.allow; changed=1
+        fi
+        if [ -e /etc/at.deny ]; then rm -f /etc/at.deny; changed=1; fi
+    fi
+    if [ "$changed" -eq 0 ]; then
+        ok "cron/at restrictions already in place"
+    else
+        ok "cron locked down: root-only spool, allow-list active (existing crontabs unaffected)"
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -776,6 +839,7 @@ main() {
     [ "$DO_SSH_POLICIES" -eq 1 ]     && echo "    - SSH session policies (no forwarding, caps, verbose log)"
     [ "$DO_COREDUMP_LIMITS" -eq 1 ]  && echo "    - core dump limits (hard core 0 + systemd-coredump off)"
     [ "$DO_UMASK_TMOUT" -eq 1 ]      && echo "    - default umask 027 + shell timeout (readonly TMOUT=900)"
+    [ "$DO_CRON_RESTRICTIONS" -eq 1 ] && echo "    - cron restrictions (root-only spool + cron.allow/at.allow)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -798,6 +862,7 @@ main() {
     setup_ssh_policies
     setup_coredump_limits
     setup_umask_tmout
+    setup_cron_restrictions
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
