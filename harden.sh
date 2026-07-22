@@ -37,6 +37,10 @@
 #      directories become root-only, and crontab/at switch from Debian's
 #      deny-list model to an allow-list with just root — unprivileged
 #      users can't schedule jobs (persistence 101) or read root's.
+#  15. Password policy (CIS 5.3/5.4): libpam-pwquality enforcing length 14,
+#      all four character classes and no long repeats — for root too
+#      (enforce_for_root) — plus the hashing algorithm pinned to yescrypt
+#      in login.defs so no tool quietly falls back to a weaker crypt.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -61,6 +65,7 @@
 #   --no-coredump-limits   skip core dump limits (hard core 0)
 #   --no-umask-tmout       skip default umask 027 / TMOUT shell timeout
 #   --no-cron-restrictions skip cron/at allow-list + spool permissions
+#   --no-password-policy   skip pwquality rules + yescrypt pin
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -87,6 +92,7 @@ DO_SSH_POLICIES=1
 DO_COREDUMP_LIMITS=1
 DO_UMASK_TMOUT=1
 DO_CRON_RESTRICTIONS=1
+DO_PASSWORD_POLICY=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -115,7 +121,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,73p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -139,6 +145,7 @@ parse_args() {
             --no-coredump-limits) DO_COREDUMP_LIMITS=0; shift;;
             --no-umask-tmout)  DO_UMASK_TMOUT=0; shift;;
             --no-cron-restrictions) DO_CRON_RESTRICTIONS=0; shift;;
+            --no-password-policy) DO_PASSWORD_POLICY=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -820,6 +827,51 @@ setup_cron_restrictions() {
     fi
 }
 
+setup_password_policy() {
+    [ "$DO_PASSWORD_POLICY" -eq 1 ] || { log "Skipping password policy"; return 0; }
+    log "Enforcing password quality and hashing policy (CIS 5.3/5.4)"
+    # The aging step (7) decides WHEN a password must change; this one
+    # decides WHAT a password may be and HOW it is stored. Quality first:
+    # libpam-pwquality gates every PAM password change — 14 characters,
+    # all four classes, no long repeats, dictionary words rejected — and
+    # enforce_for_root closes the classic hole where root "fixing" a user
+    # account types 'temp123' straight past the policy. Hashing second:
+    # Debian already defaults to yescrypt through PAM, but chpasswd and
+    # newusers read ENCRYPT_METHOD from login.defs — pin it so no path
+    # quietly falls back to a weaker crypt.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would install libpam-pwquality and set minlen=14, minclass=4, maxrepeat=3, retry=3, enforce_for_root in /etc/security/pwquality.conf\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would pin ENCRYPT_METHOD YESCRYPT in /etc/login.defs\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # cracklib-runtime is explicit on purpose: it is only a Recommends of
+    # libpwquality1, so a no-recommends install leaves the dictionary
+    # missing — and pwquality then fails CLOSED, rejecting every password
+    # ("error loading dictionary"). The e2e suite caught exactly that.
+    if ! dpkg -s libpam-pwquality >/dev/null 2>&1 || ! dpkg -s cracklib-runtime >/dev/null 2>&1; then
+        run apt-get install -y libpam-pwquality cracklib-runtime
+    fi
+    # pwquality.conf ships fully commented — uncomment-or-append each
+    # setting, same reconcile pattern as login.defs elsewhere.
+    local conf="/etc/security/pwquality.conf" key val
+    for kv in "minlen 14" "minclass 4" "maxrepeat 3" "retry 3"; do
+        key="${kv% *}"; val="${kv#* }"
+        if grep -qE "^${key}[[:space:]]*=" "$conf"; then
+            sed -i "s/^${key}[[:space:]]*=.*/${key} = ${val}/" "$conf"
+        else
+            printf '%s = %s\n' "$key" "$val" >> "$conf"
+        fi
+    done
+    # enforce_for_root is a bare flag, not key = value.
+    grep -qE '^enforce_for_root([[:space:]]|$)' "$conf" || printf 'enforce_for_root\n' >> "$conf"
+    if grep -qE '^ENCRYPT_METHOD[[:space:]]' /etc/login.defs; then
+        sed -i 's/^ENCRYPT_METHOD[[:space:]].*/ENCRYPT_METHOD\tYESCRYPT/' /etc/login.defs
+    else
+        printf 'ENCRYPT_METHOD\tYESCRYPT\n' >> /etc/login.defs
+    fi
+    ok "passwords need 14 chars / 4 classes (root included); hashing pinned to yescrypt"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -840,6 +892,7 @@ main() {
     [ "$DO_COREDUMP_LIMITS" -eq 1 ]  && echo "    - core dump limits (hard core 0 + systemd-coredump off)"
     [ "$DO_UMASK_TMOUT" -eq 1 ]      && echo "    - default umask 027 + shell timeout (readonly TMOUT=900)"
     [ "$DO_CRON_RESTRICTIONS" -eq 1 ] && echo "    - cron restrictions (root-only spool + cron.allow/at.allow)"
+    [ "$DO_PASSWORD_POLICY" -eq 1 ]  && echo "    - password policy (pwquality 14/4 classes + yescrypt pin)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -863,6 +916,7 @@ main() {
     setup_coredump_limits
     setup_umask_tmout
     setup_cron_restrictions
+    setup_password_policy
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

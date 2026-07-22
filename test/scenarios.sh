@@ -147,6 +147,18 @@ got=$(val s10 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s10 >/dev/null 2>&1
 
+echo "-- 11. Skip a step: --no-password-policy -------------------"
+fresh_node s11 >/dev/null
+docker exec s11 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-password-policy -y >/dev/null 2>&1
+if docker exec s11 grep -qE '^minlen = 14' /etc/security/pwquality.conf 2>/dev/null; then
+  F "--no-password-policy should not touch pwquality.conf" "minlen = 14 present"; else
+  P "--no-password-policy -> pwquality.conf untouched"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s11 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s11 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
