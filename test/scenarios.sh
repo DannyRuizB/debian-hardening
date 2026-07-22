@@ -171,6 +171,18 @@ got=$(val s12 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s12 >/dev/null 2>&1
 
+echo "-- 13. Skip a step: --no-rkhunter --------------------------"
+fresh_node s13 >/dev/null
+docker exec s13 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-rkhunter -y >/dev/null 2>&1
+if docker exec s13 test -f /etc/systemd/system/rkhunter-check.timer 2>/dev/null; then
+  F "--no-rkhunter should not write the rkhunter timer" "file exists"; else
+  P "--no-rkhunter -> no rkhunter baseline / timer"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s13 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s13 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

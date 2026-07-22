@@ -317,6 +317,23 @@ else
 fi
 on_node "sudo rm -f /etc/aide-probe.conf" >/dev/null 2>&1 || true
 
+echo "== Rootkit detection (rkhunter) =="
+expect_ok "rkhunter is installed" sudo test -x /usr/bin/rkhunter
+expect_ok "the rkhunter property baseline was taken" sudo test -s /var/lib/rkhunter/db/rkhunter.dat
+expect_line "the daily cron job is disabled (we use a timer)" '^CRON_DAILY_RUN="false"$' \
+  sudo grep '^CRON_DAILY_RUN=' /etc/default/rkhunter
+expect_line "a daily check timer is enabled" '^enabled$' \
+  sudo systemctl is-enabled rkhunter-check.timer
+# Behavioral: a full check actually runs and produces its summary. rkhunter
+# exits non-zero when it emits warnings (normal on a minimal container), so we
+# don't assert on rc — we assert the run completed and wrote its summary.
+rk_out=$(on_node "sudo rkhunter --check --skip-keypress --report-warnings-only --nocolors 2>&1 || true")
+if printf '%s\n' "$rk_out" | grep -qiE "System checks summary|rootkit checks|Warning:"; then
+  pass "an rkhunter check runs to completion and reports"
+else
+  fail "an rkhunter check runs to completion and reports"
+fi
+
 # LAST on purpose: banning the client cuts our own SSH access to the node.
 # Lift the shield installed at the top — from here on we WANT to be bannable.
 docker exec db-harden-node fail2ban-client set sshd delignoreip 172.17.0.1 >/dev/null 2>&1 || true

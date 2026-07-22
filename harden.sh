@@ -45,6 +45,11 @@
 #      /etc, so a backdoored sudo or an edited /etc/passwd shows up on the
 #      next check. Own config + baseline DB, checked daily by a systemd
 #      timer — tampering stops being invisible.
+#  17. Rootkit detection: rkhunter checks for known rootkits, backdoors and
+#      local exploits, plus suspicious file properties. A property baseline
+#      is taken now and re-checked daily by a systemd timer — a second
+#      detection layer alongside AIDE (AIDE = generic file integrity,
+#      rkhunter = known-threat signatures).
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -71,6 +76,7 @@
 #   --no-cron-restrictions skip cron/at allow-list + spool permissions
 #   --no-password-policy   skip pwquality rules + yescrypt pin
 #   --no-aide              skip AIDE file-integrity baseline + daily timer
+#   --no-rkhunter          skip rkhunter rootkit-detection baseline + timer
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -99,6 +105,7 @@ DO_UMASK_TMOUT=1
 DO_CRON_RESTRICTIONS=1
 DO_PASSWORD_POLICY=1
 DO_AIDE=1
+DO_RKHUNTER=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -127,7 +134,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -153,6 +160,7 @@ parse_args() {
             --no-cron-restrictions) DO_CRON_RESTRICTIONS=0; shift;;
             --no-password-policy) DO_PASSWORD_POLICY=0; shift;;
             --no-aide)         DO_AIDE=0; shift;;
+            --no-rkhunter)     DO_RKHUNTER=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -975,6 +983,77 @@ EOF
     ok "file integrity watched: /etc + system binaries, checked daily by aide-check.timer"
 }
 
+RKHUNTER_DB="/var/lib/rkhunter/db/rkhunter.dat"
+
+setup_rkhunter() {
+    [ "$DO_RKHUNTER" -eq 1 ] || { log "Skipping rkhunter"; return 0; }
+    log "Setting up rkhunter rootkit detection"
+    # AIDE (step 16) answers "did any watched file change?"; rkhunter answers
+    # "does this box show signs of a known rootkit, backdoor or local
+    # exploit?" — signature and heuristic checks AIDE doesn't do. Two layers,
+    # different questions. The property baseline (--propupd) records the
+    # current binaries so the daily --check can flag ones that change
+    # underneath it; a systemd timer runs the check, mirroring AIDE.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would install rkhunter, take a property baseline and enable rkhunter-check.timer\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # --no-install-recommends: rkhunter recommends a mail-transport-agent
+    # (exim4/postfix) to email reports — we don't want an MTA on a hardened
+    # box just for this. noninteractive so the MTA debconf prompt never blocks.
+    if ! command -v rkhunter >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive run apt-get install -y --no-install-recommends rkhunter
+    fi
+    # Use our own systemd timer, not Debian's /etc/cron.daily/rkhunter, so
+    # the check runs once (not twice) and matches the AIDE step's shape.
+    # Also stop the cron job from auto-updating signatures over the network.
+    if [ -f /etc/default/rkhunter ]; then
+        sed -i 's/^CRON_DAILY_RUN=.*/CRON_DAILY_RUN="false"/' /etc/default/rkhunter
+        sed -i 's/^CRON_DB_UPDATE=.*/CRON_DB_UPDATE="false"/' /etc/default/rkhunter
+        grep -q '^CRON_DAILY_RUN=' /etc/default/rkhunter || printf 'CRON_DAILY_RUN="false"\n' >> /etc/default/rkhunter
+        grep -q '^CRON_DB_UPDATE=' /etc/default/rkhunter || printf 'CRON_DB_UPDATE="false"\n' >> /etc/default/rkhunter
+    fi
+    # Property baseline: take it once (or if the package refreshed and left no
+    # db). Re-running --propupd on every pass would "bless" tampering that
+    # happened since — the opposite of the point — so only build when missing.
+    if [ ! -f "$RKHUNTER_DB" ]; then
+        log "Taking the rkhunter property baseline (first run)"
+        rkhunter --propupd --nocolors >/dev/null 2>&1 || warn "rkhunter --propupd reported issues"
+        ok "rkhunter property baseline recorded at $RKHUNTER_DB"
+    else
+        ok "rkhunter property baseline already present"
+    fi
+    local svc_content timer_content
+    svc_content=$(cat <<'EOF'
+[Unit]
+Description=rkhunter rootkit check (debian-hardening)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rkhunter --check --skip-keypress --report-warnings-only --nocolors
+EOF
+)
+    timer_content=$(cat <<'EOF'
+[Unit]
+Description=Daily rkhunter rootkit check (debian-hardening)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+)
+    printf '%s\n' "$svc_content" > /etc/systemd/system/rkhunter-check.service
+    printf '%s\n' "$timer_content" > /etc/systemd/system/rkhunter-check.timer
+    chmod 644 /etc/systemd/system/rkhunter-check.service /etc/systemd/system/rkhunter-check.timer
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable rkhunter-check.timer >/dev/null 2>&1 || warn "could not enable rkhunter-check.timer (no systemd?)"
+    ok "rootkit detection active: property baseline taken, checked daily by rkhunter-check.timer"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -997,6 +1076,7 @@ main() {
     [ "$DO_CRON_RESTRICTIONS" -eq 1 ] && echo "    - cron restrictions (root-only spool + cron.allow/at.allow)"
     [ "$DO_PASSWORD_POLICY" -eq 1 ]  && echo "    - password policy (pwquality 14/4 classes + yescrypt pin)"
     [ "$DO_AIDE" -eq 1 ]             && echo "    - AIDE file integrity (baseline of /etc + binaries, daily timer)"
+    [ "$DO_RKHUNTER" -eq 1 ]         && echo "    - rkhunter rootkit detection (property baseline, daily timer)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1022,6 +1102,7 @@ main() {
     setup_cron_restrictions
     setup_password_policy
     setup_aide
+    setup_rkhunter
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

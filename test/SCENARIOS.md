@@ -30,8 +30,9 @@ cd test
 | 10 | `--no-cron-restrictions` | no `cron.allow` / spool changes, the rest still applies |
 | 11 | `--no-password-policy` | `pwquality.conf` untouched (no `minlen = 14`), the rest still applies |
 | 12 | `--no-aide` | no AIDE config / baseline written, the rest still applies |
+| 13 | `--no-rkhunter` | no rkhunter baseline / timer written, the rest still applies |
 
-**Result: 20/20 checks pass.**
+**Result: 22/22 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
