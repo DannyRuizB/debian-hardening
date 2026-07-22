@@ -28,8 +28,9 @@ cd test
 | 8 | `--no-coredump-limits` | core dump limits skipped (no limits.d drop-in), the rest still applies |
 | 9 | `--no-umask-tmout` | umask / TMOUT drop-ins skipped, the rest still applies |
 | 10 | `--no-cron-restrictions` | no `cron.allow` / spool changes, the rest still applies |
+| 11 | `--no-password-policy` | `pwquality.conf` untouched (no `minlen = 14`), the rest still applies |
 
-**Result: 16/16 checks pass.**
+**Result: 18/18 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

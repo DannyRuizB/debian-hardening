@@ -248,6 +248,23 @@ else
   P "cron.deny removed (allow-list replaces the deny-list)"
 fi
 
+echo "-- Password policy (CIS 5.3/5.4) ----------------------------"
+on_node grep -q pam_pwquality /etc/pam.d/common-password \
+  && P "pam_pwquality gates every password change" \
+  || W "pam_pwquality not wired into common-password" "apt install libpam-pwquality (password step)"
+minlen=$(on_node grep -E '^minlen' /etc/security/pwquality.conf | tr -dc '0-9')
+[ "${minlen:-0}" -ge 14 ] 2>/dev/null \
+  && P "Password minimum length >= 14 ($minlen)" \
+  || W "pwquality minlen is ${minlen:-unset}" "set minlen = 14 in pwquality.conf (password step)"
+on_node grep -qE '^enforce_for_root' /etc/security/pwquality.conf \
+  && P "Quality policy binds root too (enforce_for_root)" \
+  || W "root bypasses the quality policy" "add enforce_for_root to pwquality.conf (password step)"
+em=$(ld ENCRYPT_METHOD)
+case "${em:-}" in
+  YESCRYPT|yescrypt|SHA512|sha512) P "Password hashing pinned to a strong crypt ($em)";;
+  *) W "ENCRYPT_METHOD is ${em:-unset}" "pin ENCRYPT_METHOD YESCRYPT in login.defs (password step)";;
+esac
+
 echo "-- Accounts & files -----------------------------------------"
 on_node getent group sudo | grep -qE ':.*[a-z]' \
   && P "A non-root sudo account exists ($(on_node getent group sudo | sed 's/.*://'))" \
