@@ -41,6 +41,10 @@
 #      all four character classes and no long repeats — for root too
 #      (enforce_for_root) — plus the hashing algorithm pinned to yescrypt
 #      in login.defs so no tool quietly falls back to a weaker crypt.
+#  16. File integrity (CIS 1.4): AIDE fingerprints the system binaries and
+#      /etc, so a backdoored sudo or an edited /etc/passwd shows up on the
+#      next check. Own config + baseline DB, checked daily by a systemd
+#      timer — tampering stops being invisible.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -66,6 +70,7 @@
 #   --no-umask-tmout       skip default umask 027 / TMOUT shell timeout
 #   --no-cron-restrictions skip cron/at allow-list + spool permissions
 #   --no-password-policy   skip pwquality rules + yescrypt pin
+#   --no-aide              skip AIDE file-integrity baseline + daily timer
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -93,6 +98,7 @@ DO_COREDUMP_LIMITS=1
 DO_UMASK_TMOUT=1
 DO_CRON_RESTRICTIONS=1
 DO_PASSWORD_POLICY=1
+DO_AIDE=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -121,7 +127,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,73p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -146,6 +152,7 @@ parse_args() {
             --no-umask-tmout)  DO_UMASK_TMOUT=0; shift;;
             --no-cron-restrictions) DO_CRON_RESTRICTIONS=0; shift;;
             --no-password-policy) DO_PASSWORD_POLICY=0; shift;;
+            --no-aide)         DO_AIDE=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -872,6 +879,102 @@ setup_password_policy() {
     ok "passwords need 14 chars / 4 classes (root included); hashing pinned to yescrypt"
 }
 
+# Own config + DB path rather than reusing Debian's aide-common machinery:
+# the default aide.conf watches most of the filesystem, whose baseline is
+# huge and slow to build. This scopes the fingerprint to what actually
+# matters after a compromise — the system binaries and /etc — so the check
+# is fast enough to run daily and the config is deterministic (idempotent).
+AIDE_CONF="/etc/aide/hardening.conf"
+AIDE_DB="/var/lib/aide/hardening.db"
+
+setup_aide() {
+    [ "$DO_AIDE" -eq 1 ] || { log "Skipping AIDE file integrity"; return 0; }
+    log "Setting up AIDE file-integrity monitoring (CIS 1.4)"
+    # A file-integrity baseline answers the question every other step leaves
+    # open: "did someone change something after I hardened it?" AIDE hashes
+    # the watched paths now; a daily check re-hashes and reports anything
+    # added, removed or modified — a backdoored `sudo`, an edited
+    # /etc/passwd, a new SUID binary. The baseline lives in /var/lib/aide;
+    # on a real box you'd copy it somewhere the attacker can't reach so they
+    # can't just regenerate it, which the README notes.
+    local conf_content
+    conf_content=$(cat <<EOF
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+database_in=file:$AIDE_DB
+database_out=file:$AIDE_DB.new
+gzip_dbout=no
+report_url=stdout
+
+# Rule: permissions, inode, ownership, size, mtime/ctime and strong hashes.
+Strong = p+i+n+u+g+s+m+c+sha256+sha512
+
+# What matters after a compromise: the system binaries and the config tree.
+/etc     Strong
+/bin     Strong
+/sbin    Strong
+/usr/bin Strong
+/usr/sbin Strong
+/boot    Strong
+
+# Churn that is not tampering — exclude so the daily report stays signal.
+!/etc/mtab$
+!/etc/aide/hardening.conf$
+!/etc/.*\.cache$
+EOF
+)
+    local svc_content timer_content
+    svc_content=$(cat <<EOF
+[Unit]
+Description=AIDE file-integrity check (debian-hardening)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/aide --config=$AIDE_CONF --check
+EOF
+)
+    timer_content=$(cat <<'EOF'
+[Unit]
+Description=Daily AIDE file-integrity check (debian-hardening)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would install aide, write %s, build the baseline DB and enable aide-check.timer\n' "$c_yellow" "$c_reset" "$AIDE_CONF"
+        return 0
+    fi
+    command -v aide >/dev/null 2>&1 || run apt-get install -y aide
+    install -d -m 755 /etc/aide /var/lib/aide
+    local rebuild=0
+    if [ ! -f "$AIDE_CONF" ] || [ "$(cat "$AIDE_CONF")" != "$conf_content" ]; then
+        printf '%s\n' "$conf_content" > "$AIDE_CONF"
+        chmod 644 "$AIDE_CONF"
+        rebuild=1
+    fi
+    # Build the baseline only when missing or the ruleset changed — rebuilding
+    # on every run would be slow and would paper over real drift.
+    if [ "$rebuild" -eq 1 ] || [ ! -f "$AIDE_DB" ]; then
+        log "Building the AIDE baseline (first run can take a minute)"
+        aide --config="$AIDE_CONF" --init
+        mv -f "$AIDE_DB.new" "$AIDE_DB"
+        ok "AIDE baseline built at $AIDE_DB"
+    else
+        ok "AIDE baseline already present"
+    fi
+    printf '%s\n' "$svc_content" > /etc/systemd/system/aide-check.service
+    printf '%s\n' "$timer_content" > /etc/systemd/system/aide-check.timer
+    chmod 644 /etc/systemd/system/aide-check.service /etc/systemd/system/aide-check.timer
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable aide-check.timer >/dev/null 2>&1 || warn "could not enable aide-check.timer (no systemd?)"
+    ok "file integrity watched: /etc + system binaries, checked daily by aide-check.timer"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -893,6 +996,7 @@ main() {
     [ "$DO_UMASK_TMOUT" -eq 1 ]      && echo "    - default umask 027 + shell timeout (readonly TMOUT=900)"
     [ "$DO_CRON_RESTRICTIONS" -eq 1 ] && echo "    - cron restrictions (root-only spool + cron.allow/at.allow)"
     [ "$DO_PASSWORD_POLICY" -eq 1 ]  && echo "    - password policy (pwquality 14/4 classes + yescrypt pin)"
+    [ "$DO_AIDE" -eq 1 ]             && echo "    - AIDE file integrity (baseline of /etc + binaries, daily timer)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -917,6 +1021,7 @@ main() {
     setup_umask_tmout
     setup_cron_restrictions
     setup_password_policy
+    setup_aide
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

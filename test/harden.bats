@@ -21,6 +21,7 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
   [[ "$output" == *"--no-umask-tmout"* ]]
   [[ "$output" == *"--no-cron-restrictions"* ]]
   [[ "$output" == *"--no-password-policy"* ]]
+  [[ "$output" == *"--no-aide"* ]]
   [[ "$output" == *"-h, --help"* ]]
 }
 
@@ -57,8 +58,8 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
 }
 
 @test "the per-step --no-* flags each set their toggle to 0" {
-  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening --no-ssh-policies --no-coredump-limits --no-umask-tmout --no-cron-restrictions --no-password-policy; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING \$DO_SSH_POLICIES \$DO_COREDUMP_LIMITS \$DO_UMASK_TMOUT \$DO_CRON_RESTRICTIONS \$DO_PASSWORD_POLICY\""
-  [ "$output" = "0 0 0 0 0 0 0 0 0 0 0 0 0 0" ]
+  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening --no-ssh-policies --no-coredump-limits --no-umask-tmout --no-cron-restrictions --no-password-policy --no-aide; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING \$DO_SSH_POLICIES \$DO_COREDUMP_LIMITS \$DO_UMASK_TMOUT \$DO_CRON_RESTRICTIONS \$DO_PASSWORD_POLICY \$DO_AIDE\""
+  [ "$output" = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" ]
 }
 
 @test "--allow-port accumulates into EXTRA_PORTS" {
