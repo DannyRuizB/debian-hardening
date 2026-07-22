@@ -29,8 +29,9 @@ cd test
 | 9 | `--no-umask-tmout` | umask / TMOUT drop-ins skipped, the rest still applies |
 | 10 | `--no-cron-restrictions` | no `cron.allow` / spool changes, the rest still applies |
 | 11 | `--no-password-policy` | `pwquality.conf` untouched (no `minlen = 14`), the rest still applies |
+| 12 | `--no-aide` | no AIDE config / baseline written, the rest still applies |
 
-**Result: 18/18 checks pass.**
+**Result: 20/20 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

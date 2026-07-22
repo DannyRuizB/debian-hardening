@@ -159,6 +159,18 @@ got=$(val s11 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s11 >/dev/null 2>&1
 
+echo "-- 12. Skip a step: --no-aide ------------------------------"
+fresh_node s12 >/dev/null
+docker exec s12 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-aide -y >/dev/null 2>&1
+if docker exec s12 test -f /etc/aide/hardening.conf 2>/dev/null; then
+  F "--no-aide should not write the AIDE config" "file exists"; else
+  P "--no-aide -> no AIDE config / baseline"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s12 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s12 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
