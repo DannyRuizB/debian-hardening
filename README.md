@@ -44,6 +44,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 | **Password policy** | CIS 5.3/5.4: the aging step decides *when* a password must change; this one decides *what it may be* and *how it is stored*. `libpam-pwquality` gates every PAM password change — `minlen 14`, all four character classes (`minclass 4`), `maxrepeat 3`, dictionary words rejected — and `enforce_for_root` closes the classic hole where root "fixing" an account types `temp123` straight past the policy. The hashing side: Debian already defaults to yescrypt through PAM, but `chpasswd`/`newusers` read `ENCRYPT_METHOD` from `login.defs` — pinned to `YESCRYPT` so no path quietly falls back to a weaker crypt. |
 | **File integrity** | CIS 1.4: every other step hardens a file; this one notices when someone *changes* it afterwards. AIDE fingerprints the system binaries (`/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/boot`) and the whole of `/etc` — permissions, ownership, size, mtime/ctime and SHA-256+512 — into a baseline database, and a `systemd` timer re-checks daily. A backdoored `sudo`, an edited `/etc/passwd` or a new SUID binary shows up as drift instead of staying invisible. Own config (`/etc/aide/hardening.conf`) and DB (`/var/lib/aide/hardening.db`) scoped to what matters after a compromise, so the baseline builds fast enough to check daily. On a real box, copy the baseline somewhere the attacker can't reach — otherwise they can just regenerate it. |
 | **Rootkit detection** | rkhunter scans for known rootkits, backdoors and local exploits, plus suspicious file properties and hidden files — a second detection layer alongside AIDE (AIDE = generic file integrity, rkhunter = known-threat signatures). A property baseline is taken at hardening time and re-checked daily by a `systemd` timer; Debian's own `cron.daily` job and its network signature auto-update are turned off so the check runs once, from the timer, offline. Installed without recommends so it doesn't drag in a mail-transport agent. |
+| **Module blacklist** | CIS 1.1.1 / 3.4: rarely-used filesystems (`cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`) and network protocols (`dccp`, `sctp`, `rds`, `tipc`) made unloadable in `modprobe.d` — every one is kernel code reachable from userspace (a `mount(2)` or `socket(2)` away), and several have carried privilege-escalation CVEs. Two directives per module because they close different doors: `install <m> /bin/false` defeats an explicit `modprobe`, `blacklist <m>` stops the alias auto-load path. Already-loaded modules get a best-effort unload. `usb-storage` is deliberately spared (site-dependent per CIS — it bites the restore-from-USB path), as are `squashfs`/`overlayfs` (snaps, container runtimes). |
 
 ### Lockout guard
 
@@ -86,7 +87,9 @@ sudo ./harden.sh \
 --admin-user NAME      create/ensure this sudo user before locking SSH
 --pubkey "ssh-... "    public key to install for --admin-user
 --allow-port N[/proto] extra port to open in UFW (repeatable)
---no-ssh | --no-ufw | --no-fail2ban | --no-autoupdates | --no-sysctl | --no-account-policies | --no-mount-options | --no-banners | --no-sudo-hardening   skip a step
+--no-<step>            skip any single step — one flag per table row above,
+                       e.g. --no-ssh, --no-aide, --no-module-blacklist
+                       (the full list: ./harden.sh -h)
 --no-passwordless-sudo don't grant --admin-user passwordless sudo
 --force-no-password    disable password auth even with no key (DANGEROUS)
 --dry-run              print what would change, do nothing

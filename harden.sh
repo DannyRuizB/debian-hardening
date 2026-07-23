@@ -50,6 +50,11 @@
 #      is taken now and re-checked daily by a systemd timer — a second
 #      detection layer alongside AIDE (AIDE = generic file integrity,
 #      rkhunter = known-threat signatures).
+#  18. Kernel module blacklist (CIS 1.1.1 / 3.4): rarely-used filesystems
+#      (cramfs, freevxfs, jffs2, hfs, hfsplus, udf) and network protocols
+#      (dccp, sctp, rds, tipc) disabled in modprobe.d — an `install
+#      /bin/false` line defeats explicit loads, `blacklist` stops alias
+#      auto-loading. Every one is kernel attack surface a server never uses.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -77,6 +82,7 @@
 #   --no-password-policy   skip pwquality rules + yescrypt pin
 #   --no-aide              skip AIDE file-integrity baseline + daily timer
 #   --no-rkhunter          skip rkhunter rootkit-detection baseline + timer
+#   --no-module-blacklist  skip the kernel module blacklist (rare fs + protocols)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -106,6 +112,7 @@ DO_CRON_RESTRICTIONS=1
 DO_PASSWORD_POLICY=1
 DO_AIDE=1
 DO_RKHUNTER=1
+DO_MODULE_BLACKLIST=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -134,7 +141,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,90p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -161,6 +168,7 @@ parse_args() {
             --no-password-policy) DO_PASSWORD_POLICY=0; shift;;
             --no-aide)         DO_AIDE=0; shift;;
             --no-rkhunter)     DO_RKHUNTER=0; shift;;
+            --no-module-blacklist) DO_MODULE_BLACKLIST=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1054,6 +1062,54 @@ EOF
     ok "rootkit detection active: property baseline taken, checked daily by rkhunter-check.timer"
 }
 
+MODPROBE_BLACKLIST_CONF="/etc/modprobe.d/99-hardening-blacklist.conf"
+# CIS 1.1.1 (filesystems nobody mounts on a server) + CIS 3.4 (network
+# protocols nobody speaks): each one is kernel code reachable from userspace
+# — a mount(2) or socket(2) away — and several have carried privilege-
+# escalation CVEs. usb-storage is deliberately NOT here (CIS lists it as
+# site-dependent, and it bites the restore-from-USB path on real boxes);
+# squashfs/overlayfs stay untouched too (snaps and container runtimes).
+MODULE_BLACKLIST=(cramfs freevxfs jffs2 hfs hfsplus udf dccp sctp rds tipc)
+
+setup_module_blacklist() {
+    [ "$DO_MODULE_BLACKLIST" -eq 1 ] || { log "Skipping kernel module blacklist"; return 0; }
+    log "Blacklisting rarely-used kernel modules"
+    # Two directives per module, closing two different doors: `install m
+    # /bin/false` defeats an EXPLICIT `modprobe m` (modprobe runs /bin/false
+    # instead of loading anything), and `blacklist m` stops the ALIAS
+    # auto-load path (the kernel pulling the module in behind a mount(2) or
+    # socket(2) call). One without the other leaves a door open.
+    local conf_content m
+    conf_content="# debian-hardening: keep rarely-used kernel modules unloadable (CIS 1.1.1 / 3.4)"
+    for m in "${MODULE_BLACKLIST[@]}"; do
+        conf_content+=$'\n'"install $m /bin/false"$'\n'"blacklist $m"
+    done
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s covering: %s\n' "$c_yellow" "$c_reset" "$MODPROBE_BLACKLIST_CONF" "${MODULE_BLACKLIST[*]}"
+        return 0
+    fi
+    # modprobe reads modprobe.d, so the config is useless without kmod — any
+    # real server has it, but a minimal container/chroot may not.
+    command -v modprobe >/dev/null 2>&1 || run apt-get install -y kmod
+    if [ ! -f "$MODPROBE_BLACKLIST_CONF" ] || [ "$(cat "$MODPROBE_BLACKLIST_CONF")" != "$conf_content" ]; then
+        printf '%s\n' "$conf_content" > "$MODPROBE_BLACKLIST_CONF"
+        chmod 644 "$MODPROBE_BLACKLIST_CONF"
+    fi
+    # Best-effort unload of anything already resident: the config only stops
+    # FUTURE loads. Quietly skipped where it can't work (containers, module
+    # not loaded) — on a real box a reboot settles it either way.
+    for m in "${MODULE_BLACKLIST[@]}"; do
+        if lsmod 2>/dev/null | grep -q "^$m "; then
+            if modprobe -r "$m" 2>/dev/null; then
+                ok "unloaded resident module $m"
+            else
+                warn "module $m is loaded and could not be unloaded — reboot to settle"
+            fi
+        fi
+    done
+    ok "module blacklist active: ${#MODULE_BLACKLIST[@]} modules defeated in $MODPROBE_BLACKLIST_CONF"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1077,6 +1133,7 @@ main() {
     [ "$DO_PASSWORD_POLICY" -eq 1 ]  && echo "    - password policy (pwquality 14/4 classes + yescrypt pin)"
     [ "$DO_AIDE" -eq 1 ]             && echo "    - AIDE file integrity (baseline of /etc + binaries, daily timer)"
     [ "$DO_RKHUNTER" -eq 1 ]         && echo "    - rkhunter rootkit detection (property baseline, daily timer)"
+    [ "$DO_MODULE_BLACKLIST" -eq 1 ] && echo "    - kernel module blacklist (rare filesystems + network protocols)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1103,6 +1160,7 @@ main() {
     setup_password_policy
     setup_aide
     setup_rkhunter
+    setup_module_blacklist
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
