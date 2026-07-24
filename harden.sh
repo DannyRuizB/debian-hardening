@@ -55,6 +55,11 @@
 #      (dccp, sctp, rds, tipc) disabled in modprobe.d — an `install
 #      /bin/false` line defeats explicit loads, `blacklist` stops alias
 #      auto-loading. Every one is kernel attack surface a server never uses.
+#  19. Account lockout (CIS 5.3.2): pam_faillock locks an account after 5
+#      failed password attempts for 15 minutes — brute force over any PAM
+#      path (su, login, password SSH) hits a wall the ban and the quality
+#      policy don't provide. Key-only SSH never touches the auth stack, so
+#      the admin user this script sets up can't be locked out by it.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -83,6 +88,7 @@
 #   --no-aide              skip AIDE file-integrity baseline + daily timer
 #   --no-rkhunter          skip rkhunter rootkit-detection baseline + timer
 #   --no-module-blacklist  skip the kernel module blacklist (rare fs + protocols)
+#   --no-faillock          skip account lockout after failed logins (pam_faillock)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -113,6 +119,7 @@ DO_PASSWORD_POLICY=1
 DO_AIDE=1
 DO_RKHUNTER=1
 DO_MODULE_BLACKLIST=1
+DO_FAILLOCK=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -141,7 +148,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,90p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,96p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -169,6 +176,7 @@ parse_args() {
             --no-aide)         DO_AIDE=0; shift;;
             --no-rkhunter)     DO_RKHUNTER=0; shift;;
             --no-module-blacklist) DO_MODULE_BLACKLIST=0; shift;;
+            --no-faillock)     DO_FAILLOCK=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1110,6 +1118,75 @@ setup_module_blacklist() {
     ok "module blacklist active: ${#MODULE_BLACKLIST[@]} modules defeated in $MODPROBE_BLACKLIST_CONF"
 }
 
+FAILLOCK_CONF="/etc/security/faillock.conf"
+
+setup_faillock() {
+    [ "$DO_FAILLOCK" -eq 1 ] || { log "Skipping account lockout (faillock)"; return 0; }
+    log "Enabling account lockout after failed logins (CIS 5.3.2)"
+    # The password-quality step (15) makes each guess expensive; Fail2Ban
+    # (step 4) blocks the SSH *source*. This closes the third face: lock the
+    # ACCOUNT itself after 5 failed password attempts, so brute force over any
+    # PAM path — su, console login, keyboard-interactive SSH — hits a wall,
+    # not just network scanners. deny=5, unlock_time=900 (15 min), audit on.
+    #
+    # Crucially, key-only SSH never touches the PAM *auth* stack, so the admin
+    # user this script installs (locked password, key login) can never be
+    # locked out by this — the lockout only bites password authentication.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would set deny=5 unlock_time=900 in %s and enable the pam-auth-update faillock profiles\n' "$c_yellow" "$c_reset" "$FAILLOCK_CONF"
+        return 0
+    fi
+    # faillock.conf is the single source of truth for the tunables (both PAM
+    # lines read it), so pam_faillock.so needs no inline arguments — which is
+    # also what keeps pam-auth-update's generated common-auth deterministic.
+    local conf_content
+    conf_content=$(cat <<'EOF'
+# Managed by debian-hardening (faillock step). CIS 5.3.2.
+deny = 5
+unlock_time = 900
+audit
+EOF
+)
+    if [ ! -f "$FAILLOCK_CONF" ] || [ "$(cat "$FAILLOCK_CONF")" != "$conf_content" ]; then
+        printf '%s\n' "$conf_content" > "$FAILLOCK_CONF"
+        chmod 644 "$FAILLOCK_CONF"
+    fi
+    # Debian wires PAM modules through pam-auth-update profiles, not by hand-
+    # editing common-auth (which the tool would clobber). Two profiles: the
+    # high-priority `preauth` gate that refuses a locked account before the
+    # password prompt, and the low-priority `authfail` tally that records a
+    # failure and dies. Priorities put preauth above pam_unix and authfail
+    # below it — the ordering pam_faillock requires.
+    install -d -m 755 /usr/share/pam-configs
+    cat > /usr/share/pam-configs/hardening-faillock <<'EOF'
+Name: Account lockout — refuse locked accounts (debian-hardening, preauth)
+Default: yes
+Priority: 1024
+Auth-Type: Primary
+Auth:
+	requisite			pam_faillock.so preauth
+Account-Type: Additional
+Account:
+	required			pam_faillock.so
+EOF
+    cat > /usr/share/pam-configs/hardening-faillock-authfail <<'EOF'
+Name: Account lockout — tally failures and lock (debian-hardening, authfail)
+Default: yes
+Priority: 0
+Auth-Type: Primary
+Auth:
+	[default=die]			pam_faillock.so authfail
+EOF
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive pam-auth-update --package \
+            --enable hardening-faillock --enable hardening-faillock-authfail \
+            || warn "pam-auth-update could not enable the faillock profiles"
+        ok "account lockout active: 5 failed logins → 15-minute lock (key-only SSH unaffected)"
+    else
+        warn "pam-auth-update not found — faillock profiles written but not wired"
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1134,6 +1211,7 @@ main() {
     [ "$DO_AIDE" -eq 1 ]             && echo "    - AIDE file integrity (baseline of /etc + binaries, daily timer)"
     [ "$DO_RKHUNTER" -eq 1 ]         && echo "    - rkhunter rootkit detection (property baseline, daily timer)"
     [ "$DO_MODULE_BLACKLIST" -eq 1 ] && echo "    - kernel module blacklist (rare filesystems + network protocols)"
+    [ "$DO_FAILLOCK" -eq 1 ]         && echo "    - account lockout after 5 failed logins (pam_faillock)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1161,6 +1239,7 @@ main() {
     setup_aide
     setup_rkhunter
     setup_module_blacklist
+    setup_faillock
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
