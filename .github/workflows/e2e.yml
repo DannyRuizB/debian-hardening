@@ -23,6 +23,17 @@ jobs:
       - name: Boot the test node
         run: ./test/node.sh up && ./test/node.sh wait
 
+      # CIS 6.1 offenders planted BEFORE hardening: a world-writable file, an
+      # orphan owned by a UID that doesn't exist, and a 777 dir without the
+      # sticky bit. The file-permissions sweeps must fix all three — verify's
+      # checks flip from red to green because of these, not by vacuum.
+      - name: Plant file-permission offenders for the first pass to fix
+        run: |
+          docker exec db-harden-node bash -c "
+            install -d -m 777 /usr/local/share/dh-ww-dir &&
+            touch /usr/local/share/dh-ww-file && chmod 666 /usr/local/share/dh-ww-file &&
+            touch /usr/local/share/dh-orphan && chown 12345:12345 /usr/local/share/dh-orphan"
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \
