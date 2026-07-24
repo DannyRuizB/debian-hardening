@@ -205,6 +205,18 @@ if docker exec s15 test -f /etc/ssh/sshd_config.d/96-hardening-access.conf 2>/de
   P "no --admin-user -> AllowGroups skipped (lockout guard)"; fi
 docker rm -f s15 >/dev/null 2>&1
 
+echo "-- 16. Skip a step: --no-service-sandboxing ----------------"
+fresh_node s16 >/dev/null
+docker exec s16 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-service-sandboxing -y >/dev/null 2>&1
+if docker exec s16 test -f /etc/systemd/system/fail2ban.service.d/99-hardening.conf 2>/dev/null; then
+  F "--no-service-sandboxing should not write the fail2ban drop-in" "file exists"; else
+  P "--no-service-sandboxing -> no fail2ban sandbox drop-in"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s16 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s16 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

@@ -69,6 +69,11 @@
 #      `ssh-users` group may log in (sshd AllowGroups). The admin user is
 #      added to it first; if there is no admin user the step is SKIPPED,
 #      because an AllowGroups nobody satisfies locks everyone out.
+##  22. Service sandboxing (systemd): a hardening drop-in for the fail2ban
+#      unit — NoNewPrivileges, PrivateTmp, ProtectSystem=full, ProtectHome,
+#      ProtectKernelTunables, ProtectControlGroups, RestrictSUIDSGID. If the
+#      unit fails to start with it, the drop-in is reverted. A conservative
+#      set on purpose: fail2ban still needs the network and to run ufw.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -100,6 +105,7 @@
 #   --no-faillock          skip account lockout after failed logins (pam_faillock)
 #   --no-file-permissions  skip file permission hardening (CIS 6.1 sweeps)
 #   --no-ssh-access        skip limiting SSH login to the ssh-users group
+#   --no-service-sandboxing  skip the systemd sandboxing drop-in for fail2ban
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -133,6 +139,7 @@ DO_MODULE_BLACKLIST=1
 DO_FAILLOCK=1
 DO_FILE_PERMISSIONS=1
 DO_SSH_ACCESS=1
+DO_SERVICE_SANDBOXING=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -161,7 +168,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,108p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,115p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -192,6 +199,7 @@ parse_args() {
             --no-faillock)     DO_FAILLOCK=0; shift;;
             --no-file-permissions) DO_FILE_PERMISSIONS=0; shift;;
             --no-ssh-access)   DO_SSH_ACCESS=0; shift;;
+            --no-service-sandboxing) DO_SERVICE_SANDBOXING=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1325,6 +1333,74 @@ EOF
     fi
 }
 
+SANDBOX_UNIT="fail2ban"
+SANDBOX_DROPIN_DIR="/etc/systemd/system/fail2ban.service.d"
+SANDBOX_DROPIN="$SANDBOX_DROPIN_DIR/99-hardening.conf"
+
+setup_service_sandboxing() {
+    [ "$DO_SERVICE_SANDBOXING" -eq 1 ] || { log "Skipping service sandboxing"; return 0; }
+    log "Sandboxing the $SANDBOX_UNIT service (systemd)"
+    # A network daemon that runs external commands (fail2ban shells out to
+    # ufw/iptables) is a juicy foothold if it's ever exploited. systemd can
+    # box it in for free: no new privileges, a private /tmp, most of the
+    # filesystem read-only, kernel tunables and cgroups protected. The set is
+    # deliberately CONSERVATIVE — fail2ban still needs the network and to run
+    # ufw, so no PrivateNetwork / ProtectSystem=strict / kernel-module lockout
+    # that would break it. If the unit won't start with the drop-in, we revert
+    # it: a hardening step must never leave a core service down.
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "systemd not available — service sandboxing skipped"
+        return 0
+    fi
+    if [ "$DO_FAIL2BAN" -ne 1 ]; then
+        warn "fail2ban was skipped (--no-fail2ban) — nothing to sandbox"
+        return 0
+    fi
+    local content
+    content=$(cat <<'EOF'
+# Managed by debian-hardening (service sandboxing step).
+# Conservative systemd confinement for fail2ban: hardens the daemon without
+# taking away the network or its ability to run ufw. Edit flags, not this file.
+[Service]
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# ProtectSystem=full makes /etc read-only, but the ufw banaction must write
+# /etc/ufw/*.rules to install a ban — carve that back out (leading `-` so the
+# unit still starts if ufw was skipped and the path doesn't exist).
+ReadWritePaths=-/etc/ufw
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s and restart %s\n' "$c_yellow" "$c_reset" "$SANDBOX_DROPIN" "$SANDBOX_UNIT"
+        return 0
+    fi
+    if [ -f "$SANDBOX_DROPIN" ] && [ "$(cat "$SANDBOX_DROPIN")" = "$content" ]; then
+        ok "$SANDBOX_UNIT sandboxing already in place"
+        return 0
+    fi
+    install -d -m 755 "$SANDBOX_DROPIN_DIR"
+    printf '%s\n' "$content" > "$SANDBOX_DROPIN"
+    chmod 644 "$SANDBOX_DROPIN"
+    systemctl daemon-reload
+    # Restart under the new confinement and confirm it came back — if the
+    # sandbox is too tight for this box, roll it back rather than ship a dead
+    # intrusion-prevention service.
+    if systemctl restart "$SANDBOX_UNIT" 2>/dev/null && systemctl is-active --quiet "$SANDBOX_UNIT"; then
+        ok "$SANDBOX_UNIT is sandboxed (NoNewPrivileges, PrivateTmp, ProtectSystem=full, ...)"
+    else
+        rm -f "$SANDBOX_DROPIN"
+        systemctl daemon-reload
+        systemctl restart "$SANDBOX_UNIT" 2>/dev/null || true
+        err "$SANDBOX_UNIT failed to start with the sandbox drop-in — reverted"
+        return 1
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1352,6 +1428,7 @@ main() {
     [ "$DO_FAILLOCK" -eq 1 ]         && echo "    - account lockout after 5 failed logins (pam_faillock)"
     [ "$DO_FILE_PERMISSIONS" -eq 1 ] && echo "    - file permissions: account DB modes, world-writable + orphan sweeps"
     [ "$DO_SSH_ACCESS" -eq 1 ]      && echo "    - SSH login limited to the ssh-users group (admin included)"
+    [ "$DO_SERVICE_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the fail2ban service"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1382,6 +1459,7 @@ main() {
     setup_faillock
     setup_file_permissions
     setup_ssh_access_control
+    setup_service_sandboxing
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

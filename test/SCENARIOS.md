@@ -34,7 +34,7 @@ cd test
 | 14 | `--no-ssh-access` | no `AllowGroups` drop-in written, the rest still applies |
 | 15 | (no `--admin-user`) | the `AllowGroups` step refuses to run — an allow-list nobody satisfies would lock everyone out |
 
-**Result: 26/26 checks pass.**
+**Result: 28/28 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
