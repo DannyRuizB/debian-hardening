@@ -25,10 +25,10 @@ improvable) or `FAIL` (a core control missing — serious). The score weights
 Score = (PASS + 0.5*WARN) / total * 100
 ```
 
-Categories: SSH authentication (core), SSH hardening extras (CIS), firewall,
-intrusion prevention, patch management, kernel parameters (CIS network),
-account policies (CIS), filesystem mount options (CIS), warning banners (CIS),
-sudo hardening (CIS), and accounts & files.
+The checks are grouped into one category per hardening step — the `--`
+section headers in the audit output, from SSH authentication (core) down to
+the closing accounts & files sweep. When `harden.sh` grows a step, the audit
+grows a section.
 
 ## What it caught — and the fix
 
@@ -93,7 +93,7 @@ rkhunter installed, the property baseline present, and a daily check timer
 enabled. Current score on a freshly hardened node:
 
 ```
- Score: 75 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 78 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty
