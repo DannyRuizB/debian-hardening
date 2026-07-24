@@ -183,6 +183,28 @@ got=$(val s13 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s13 >/dev/null 2>&1
 
+echo "-- 14. Skip a step: --no-ssh-access ------------------------"
+fresh_node s14 >/dev/null
+docker exec s14 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ssh-access -y >/dev/null 2>&1
+if docker exec s14 test -f /etc/ssh/sshd_config.d/96-hardening-access.conf 2>/dev/null; then
+  F "--no-ssh-access should not write the AllowGroups drop-in" "file exists"; else
+  P "--no-ssh-access -> no AllowGroups drop-in"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s14 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s14 >/dev/null 2>&1
+
+echo "-- 15. Guard: no --admin-user -> AllowGroups is NOT written -"
+fresh_node s15 >/dev/null
+# No --admin-user: the step must refuse (an AllowGroups nobody satisfies
+# would lock everyone out) while the rest of the baseline still runs.
+docker exec s15 bash /root/harden.sh -y >/dev/null 2>&1
+if docker exec s15 test -f /etc/ssh/sshd_config.d/96-hardening-access.conf 2>/dev/null; then
+  F "AllowGroups must not be written without an admin user" "file exists"; else
+  P "no --admin-user -> AllowGroups skipped (lockout guard)"; fi
+docker rm -f s15 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

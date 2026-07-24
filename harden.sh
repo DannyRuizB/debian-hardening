@@ -65,6 +65,10 @@
 #      world-writable bit cleared on files, orphan (unowned/ungrouped)
 #      files adopted by root, sticky bit on world-writable directories,
 #      and a SUID/SGID inventory logged for review (never auto-removed).
+##  21. SSH access control (CIS 5.2): only members of a dedicated
+#      `ssh-users` group may log in (sshd AllowGroups). The admin user is
+#      added to it first; if there is no admin user the step is SKIPPED,
+#      because an AllowGroups nobody satisfies locks everyone out.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -95,6 +99,7 @@
 #   --no-module-blacklist  skip the kernel module blacklist (rare fs + protocols)
 #   --no-faillock          skip account lockout after failed logins (pam_faillock)
 #   --no-file-permissions  skip file permission hardening (CIS 6.1 sweeps)
+#   --no-ssh-access        skip limiting SSH login to the ssh-users group
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -127,6 +132,7 @@ DO_RKHUNTER=1
 DO_MODULE_BLACKLIST=1
 DO_FAILLOCK=1
 DO_FILE_PERMISSIONS=1
+DO_SSH_ACCESS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -155,7 +161,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,102p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,108p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -185,6 +191,7 @@ parse_args() {
             --no-module-blacklist) DO_MODULE_BLACKLIST=0; shift;;
             --no-faillock)     DO_FAILLOCK=0; shift;;
             --no-file-permissions) DO_FILE_PERMISSIONS=0; shift;;
+            --no-ssh-access)   DO_SSH_ACCESS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1254,6 +1261,70 @@ setup_file_permissions() {
     ok "file permissions hardened: account DB pinned, world-writable and orphan sweeps clean"
 }
 
+SSH_ACCESS_GROUP="ssh-users"
+SSH_ACCESS_DROPIN="/etc/ssh/sshd_config.d/96-hardening-access.conf"
+
+setup_ssh_access_control() {
+    [ "$DO_SSH_ACCESS" -eq 1 ] || { log "Skipping SSH access control"; return 0; }
+    log "Limiting SSH login to the $SSH_ACCESS_GROUP group (CIS 5.2)"
+    # Step 2 hardens HOW you authenticate; this limits WHO may even try:
+    # `AllowGroups ssh-users` means sshd rejects anyone not in that group
+    # before the auth stack runs — a service account or a stale login can't
+    # be brute-forced over SSH if it isn't allowed to reach SSH at all.
+    #
+    # THE lockout guard: an AllowGroups that no live account satisfies locks
+    # EVERYONE out. So the admin user is the anchor — with no --admin-user we
+    # have no one we can prove is safe, and the step refuses to run rather
+    # than risk bricking remote access.
+    if [ -z "$ADMIN_USER" ]; then
+        warn "no --admin-user given — skipping SSH access control (an AllowGroups with no allowed user would lock everyone out)"
+        return 0
+    fi
+    if ! command -v sshd >/dev/null 2>&1; then
+        warn "sshd not installed — SSH access control skipped"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would create group %s, add %s to it, and write %s with AllowGroups %s\n' \
+            "$c_yellow" "$c_reset" "$SSH_ACCESS_GROUP" "$ADMIN_USER" "$SSH_ACCESS_DROPIN" "$SSH_ACCESS_GROUP"
+        return 0
+    fi
+    # Group first, admin in it, THEN the sshd directive — never the other way
+    # round, or there's a window where AllowGroups is live with no member.
+    groupadd -f "$SSH_ACCESS_GROUP"
+    if ! id -nG "$ADMIN_USER" 2>/dev/null | grep -qw "$SSH_ACCESS_GROUP"; then
+        usermod -aG "$SSH_ACCESS_GROUP" "$ADMIN_USER"
+    fi
+    # Refuse to write the directive unless the admin is provably in the group
+    # (usermod could have failed) — the guard that keeps us out of a lockout.
+    if ! id -nG "$ADMIN_USER" 2>/dev/null | grep -qw "$SSH_ACCESS_GROUP"; then
+        err "could not add $ADMIN_USER to $SSH_ACCESS_GROUP — not writing AllowGroups (would lock everyone out)"
+        return 1
+    fi
+    local content
+    content=$(cat <<EOF
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+# Only members of $SSH_ACCESS_GROUP may log in over SSH (CIS 5.2).
+AllowGroups $SSH_ACCESS_GROUP
+EOF
+)
+    if [ -f "$SSH_ACCESS_DROPIN" ] && [ "$(cat "$SSH_ACCESS_DROPIN")" = "$content" ]; then
+        ok "SSH access already limited to $SSH_ACCESS_GROUP"
+        return 0
+    fi
+    install -d -m 755 /etc/ssh/sshd_config.d
+    printf '%s\n' "$content" > "$SSH_ACCESS_DROPIN"
+    chmod 644 "$SSH_ACCESS_DROPIN"
+    if sshd -t 2>/dev/null; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+        ok "SSH login limited to $SSH_ACCESS_GROUP ($ADMIN_USER is a member)"
+    else
+        rm -f "$SSH_ACCESS_DROPIN"
+        err "sshd config validation failed after adding AllowGroups — reverted"
+        return 1
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1280,6 +1351,7 @@ main() {
     [ "$DO_MODULE_BLACKLIST" -eq 1 ] && echo "    - kernel module blacklist (rare filesystems + network protocols)"
     [ "$DO_FAILLOCK" -eq 1 ]         && echo "    - account lockout after 5 failed logins (pam_faillock)"
     [ "$DO_FILE_PERMISSIONS" -eq 1 ] && echo "    - file permissions: account DB modes, world-writable + orphan sweeps"
+    [ "$DO_SSH_ACCESS" -eq 1 ]      && echo "    - SSH login limited to the ssh-users group (admin included)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1309,6 +1381,7 @@ main() {
     setup_module_blacklist
     setup_faillock
     setup_file_permissions
+    setup_ssh_access_control
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

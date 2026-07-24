@@ -31,8 +31,10 @@ cd test
 | 11 | `--no-password-policy` | `pwquality.conf` untouched (no `minlen = 14`), the rest still applies |
 | 12 | `--no-aide` | no AIDE config / baseline written, the rest still applies |
 | 13 | `--no-rkhunter` | no rkhunter baseline / timer written, the rest still applies |
+| 14 | `--no-ssh-access` | no `AllowGroups` drop-in written, the rest still applies |
+| 15 | (no `--admin-user`) | the `AllowGroups` step refuses to run — an allow-list nobody satisfies would lock everyone out |
 
-**Result: 22/22 checks pass.**
+**Result: 26/26 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
