@@ -60,6 +60,11 @@
 #      path (su, login, password SSH) hits a wall the ban and the quality
 #      policy don't provide. Key-only SSH never touches the auth stack, so
 #      the admin user this script sets up can't be locked out by it.
+#  20. File permissions (CIS 6.1): exact owner/group/mode on the account
+#      database (passwd, shadow, group, gshadow and their '-' backups),
+#      world-writable bit cleared on files, orphan (unowned/ungrouped)
+#      files adopted by root, sticky bit on world-writable directories,
+#      and a SUID/SGID inventory logged for review (never auto-removed).
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -89,6 +94,7 @@
 #   --no-rkhunter          skip rkhunter rootkit-detection baseline + timer
 #   --no-module-blacklist  skip the kernel module blacklist (rare fs + protocols)
 #   --no-faillock          skip account lockout after failed logins (pam_faillock)
+#   --no-file-permissions  skip file permission hardening (CIS 6.1 sweeps)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -120,6 +126,7 @@ DO_AIDE=1
 DO_RKHUNTER=1
 DO_MODULE_BLACKLIST=1
 DO_FAILLOCK=1
+DO_FILE_PERMISSIONS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -148,7 +155,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,96p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,102p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -177,6 +184,7 @@ parse_args() {
             --no-rkhunter)     DO_RKHUNTER=0; shift;;
             --no-module-blacklist) DO_MODULE_BLACKLIST=0; shift;;
             --no-faillock)     DO_FAILLOCK=0; shift;;
+            --no-file-permissions) DO_FILE_PERMISSIONS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1187,6 +1195,65 @@ EOF
     fi
 }
 
+setup_file_permissions() {
+    [ "$DO_FILE_PERMISSIONS" -eq 1 ] || { log "Skipping file permission hardening"; return 0; }
+    log "Hardening critical file permissions (CIS 6.1)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would pin account-DB modes, clear world-writable bits, adopt orphan files and sticky world-writable dirs\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # 1. The account database (CIS 6.1.2-6.1.8): exact owner/group/mode on
+    #    passwd/group (world-readable by design) and shadow/gshadow (hashes —
+    #    group `shadow` only). The '-' files are the shadow suite's one-step
+    #    backups: same secrets, same modes, and routinely forgotten.
+    local f
+    for f in /etc/passwd /etc/passwd- /etc/group /etc/group-; do
+        [ -e "$f" ] && { chown root:root "$f"; chmod 644 "$f"; }
+    done
+    for f in /etc/shadow /etc/shadow- /etc/gshadow /etc/gshadow-; do
+        [ -e "$f" ] && { chown root:shadow "$f"; chmod 640 "$f"; }
+    done
+    # 2. World-writable files (CIS 6.1.9): any local user can rewrite them —
+    #    a config, a script some cron runs as root... -xdev keeps the sweep on
+    #    the root filesystem (skips /proc, /sys and other mounts on its own);
+    #    /tmp-style scratch is excluded on purpose: transient by design and
+    #    already guarded by the sticky bit on the directory.
+    local ww_files n
+    ww_files=$(find / -xdev \( -path /tmp -o -path /var/tmp \) -prune -o -type f -perm -0002 -print 2>/dev/null || true)
+    if [ -n "$ww_files" ]; then
+        n=$(printf '%s\n' "$ww_files" | wc -l)
+        printf '%s\n' "$ww_files" | while IFS= read -r f; do chmod o-w "$f"; done
+        warn "cleared the world-writable bit on $n file(s):"
+        printf '%s\n' "$ww_files" | sed 's/^/      /'
+    fi
+    # 3. Orphan files (CIS 6.1.10/11): a deleted account leaves its files
+    #    behind, and the next account created with the recycled UID silently
+    #    inherits them. Adopting them as root:root closes that door.
+    local orphans
+    orphans=$(find / -xdev \( -path /tmp -o -path /var/tmp \) -prune -o \( -nouser -o -nogroup \) -print 2>/dev/null || true)
+    if [ -n "$orphans" ]; then
+        n=$(printf '%s\n' "$orphans" | wc -l)
+        printf '%s\n' "$orphans" | while IFS= read -r f; do chown root:root "$f"; done
+        warn "adopted $n unowned/ungrouped file(s) as root:root:"
+        printf '%s\n' "$orphans" | sed 's/^/      /'
+    fi
+    # 4. A world-writable directory without the sticky bit lets any user
+    #    delete or replace anyone else's files in it (the bit is why /tmp
+    #    works at all). Adding +t is always safe; removing o+w might not be.
+    local ww_dirs d
+    ww_dirs=$(find / -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null || true)
+    if [ -n "$ww_dirs" ]; then
+        printf '%s\n' "$ww_dirs" | while IFS= read -r d; do chmod +t "$d"; done
+        warn "added the sticky bit to world-writable dir(s): $(printf '%s\n' "$ww_dirs" | wc -l)"
+    fi
+    # 5. SUID/SGID binaries (CIS 6.1.13/14): site-dependent by definition —
+    #    stripping bits here could break sudo/passwd/ping. Surfaced, not touched.
+    local suid_count
+    suid_count=$(find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | wc -l || true)
+    log "SUID/SGID binaries present: $suid_count (review: find / -xdev -type f -perm -4000 -o -perm -2000)"
+    ok "file permissions hardened: account DB pinned, world-writable and orphan sweeps clean"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1212,6 +1279,7 @@ main() {
     [ "$DO_RKHUNTER" -eq 1 ]         && echo "    - rkhunter rootkit detection (property baseline, daily timer)"
     [ "$DO_MODULE_BLACKLIST" -eq 1 ] && echo "    - kernel module blacklist (rare filesystems + network protocols)"
     [ "$DO_FAILLOCK" -eq 1 ]         && echo "    - account lockout after 5 failed logins (pam_faillock)"
+    [ "$DO_FILE_PERMISSIONS" -eq 1 ] && echo "    - file permissions: account DB modes, world-writable + orphan sweeps"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1240,6 +1308,7 @@ main() {
     setup_rkhunter
     setup_module_blacklist
     setup_faillock
+    setup_file_permissions
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

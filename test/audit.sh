@@ -318,6 +318,22 @@ on_node grep -q 'pam_faillock.so preauth' /etc/pam.d/common-auth \
   && P "pam_faillock preauth gate wired into common-auth" \
   || W "pam_faillock not active in common-auth" "run pam-auth-update --enable (faillock step)"
 
+echo "-- File permissions (CIS 6.1) -------------------------------"
+on_node stat -c '%a %U %G' /etc/passwd | grep -q '^644 root root$' \
+  && P "/etc/passwd is 644 root:root" \
+  || W "/etc/passwd modes are loose" "chown root:root + chmod 644 (file-permissions step)"
+on_node stat -c '%a %U %G' /etc/shadow | grep -qE '^(0|600|640) root (root|shadow)$' \
+  && P "/etc/shadow is 640 root:shadow or stricter" \
+  || W "/etc/shadow modes are loose" "chown root:shadow + chmod 640 (file-permissions step)"
+ww_count=$(on_node bash -c 'find / -xdev \( -path /tmp -o -path /var/tmp \) -prune -o -type f -perm -0002 -print 2>/dev/null | wc -l')
+[ "${ww_count:-1}" = "0" ] \
+  && P "No world-writable files outside scratch dirs" \
+  || W "world-writable files present ($ww_count)" "chmod o-w them (file-permissions step)"
+orphan_count=$(on_node bash -c 'find / -xdev \( -path /tmp -o -path /var/tmp \) -prune -o \( -nouser -o -nogroup \) -print 2>/dev/null | wc -l')
+[ "${orphan_count:-1}" = "0" ] \
+  && P "No unowned or ungrouped files" \
+  || W "orphan files present ($orphan_count)" "chown root:root them (file-permissions step)"
+
 echo "-- Accounts & files -----------------------------------------"
 on_node getent group sudo | grep -qE ':.*[a-z]' \
   && P "A non-root sudo account exists ($(on_node getent group sudo | sed 's/.*://'))" \

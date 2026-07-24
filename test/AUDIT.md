@@ -93,7 +93,7 @@ rkhunter installed, the property baseline present, and a daily check timer
 enabled. Current score on a freshly hardened node:
 
 ```
- Score: 78 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 82 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty
