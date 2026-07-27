@@ -217,6 +217,18 @@ got=$(val s16 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s16 >/dev/null 2>&1
 
+echo "-- 17. Skip a step: --no-journald --------------------------"
+fresh_node s17 >/dev/null
+docker exec s17 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-journald -y >/dev/null 2>&1
+if docker exec s17 test -f /etc/systemd/journald.conf.d/99-hardening.conf 2>/dev/null; then
+  F "--no-journald should not write the journald drop-in" "file exists"; else
+  P "--no-journald -> no journald drop-in"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s17 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s17 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

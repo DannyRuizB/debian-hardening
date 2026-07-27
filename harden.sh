@@ -74,6 +74,11 @@
 #      ProtectKernelTunables, ProtectControlGroups, RestrictSUIDSGID. If the
 #      unit fails to start with it, the drop-in is reverted. A conservative
 #      set on purpose: fail2ban still needs the network and to run ufw.
+##  23. Journald persistence (CIS 4.2.2): a drop-in makes systemd-journald
+#      store logs on disk (Storage=persistent) so they survive a reboot for
+#      forensics, compresses them, and caps their size (SystemMaxUse). The
+#      volatile default loses every log on restart — useless after an
+#      incident that reboots the box.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -106,6 +111,7 @@
 #   --no-file-permissions  skip file permission hardening (CIS 6.1 sweeps)
 #   --no-ssh-access        skip limiting SSH login to the ssh-users group
 #   --no-service-sandboxing  skip the systemd sandboxing drop-in for fail2ban
+#   --no-journald          skip persistent + size-capped journald logging
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -140,6 +146,7 @@ DO_FAILLOCK=1
 DO_FILE_PERMISSIONS=1
 DO_SSH_ACCESS=1
 DO_SERVICE_SANDBOXING=1
+DO_JOURNALD=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -168,7 +175,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,115p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,122p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -200,6 +207,7 @@ parse_args() {
             --no-file-permissions) DO_FILE_PERMISSIONS=0; shift;;
             --no-ssh-access)   DO_SSH_ACCESS=0; shift;;
             --no-service-sandboxing) DO_SERVICE_SANDBOXING=0; shift;;
+            --no-journald)     DO_JOURNALD=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1401,6 +1409,53 @@ EOF
     fi
 }
 
+JOURNALD_DROPIN_DIR="/etc/systemd/journald.conf.d"
+JOURNALD_DROPIN="$JOURNALD_DROPIN_DIR/99-hardening.conf"
+
+setup_journald() {
+    [ "$DO_JOURNALD" -eq 1 ] || { log "Skipping journald persistence"; return 0; }
+    log "Making journald logs persistent and size-capped (CIS 4.2.2)"
+    # By default systemd-journald keeps logs in a tmpfs (/run/log/journal) and
+    # loses everything on reboot — so the one event you most want to look at,
+    # the compromise that forced a restart, is gone. Storage=persistent moves
+    # them to /var/log/journal (survives reboots); Compress keeps that cheap;
+    # SystemMaxUse caps the footprint so logs can't fill the disk. A drop-in,
+    # not an edit of journald.conf (which a package upgrade would clobber).
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "systemd not available — journald hardening skipped"
+        return 0
+    fi
+    local content
+    content=$(cat <<'EOF'
+# Managed by debian-hardening (journald step, CIS 4.2.2). Edit flags, not this.
+[Journal]
+Storage=persistent
+Compress=yes
+SystemMaxUse=200M
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s (Storage=persistent, Compress, SystemMaxUse) and restart systemd-journald\n' "$c_yellow" "$c_reset" "$JOURNALD_DROPIN"
+        return 0
+    fi
+    if [ -f "$JOURNALD_DROPIN" ] && [ "$(cat "$JOURNALD_DROPIN")" = "$content" ]; then
+        ok "journald persistence already in place"
+        return 0
+    fi
+    install -d -m 755 "$JOURNALD_DROPIN_DIR"
+    printf '%s\n' "$content" > "$JOURNALD_DROPIN"
+    chmod 644 "$JOURNALD_DROPIN"
+    # /var/log/journal must exist for persistent storage; journald creates it
+    # on restart, but making it explicit means the first boot after this is
+    # already persistent instead of one-reboot-behind.
+    install -d -m 2755 -o root -g systemd-journal /var/log/journal 2>/dev/null || install -d -m 2755 /var/log/journal
+    if systemctl restart systemd-journald 2>/dev/null; then
+        ok "journald now persistent (/var/log/journal), compressed, capped at 200M"
+    else
+        warn "wrote the journald drop-in but could not restart systemd-journald"
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1429,6 +1484,7 @@ main() {
     [ "$DO_FILE_PERMISSIONS" -eq 1 ] && echo "    - file permissions: account DB modes, world-writable + orphan sweeps"
     [ "$DO_SSH_ACCESS" -eq 1 ]      && echo "    - SSH login limited to the ssh-users group (admin included)"
     [ "$DO_SERVICE_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the fail2ban service"
+    [ "$DO_JOURNALD" -eq 1 ]        && echo "    - persistent, size-capped journald logging"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1460,6 +1516,7 @@ main() {
     setup_file_permissions
     setup_ssh_access_control
     setup_service_sandboxing
+    setup_journald
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
