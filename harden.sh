@@ -79,6 +79,11 @@
 #      forensics, compresses them, and caps their size (SystemMaxUse). The
 #      volatile default loses every log on restart — useless after an
 #      incident that reboots the box.
+##  24. Su restriction (CIS 5.7): pam_wheel gates `su` on membership of the
+#      `sugroup` group, checked by real uid (use_uid) BEFORE the password is
+#      even considered — a stolen root password alone no longer buys a
+#      shell. The group is created EMPTY on purpose: admins use sudo, and
+#      the group is the explicit, auditable exception list.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -112,6 +117,7 @@
 #   --no-ssh-access        skip limiting SSH login to the ssh-users group
 #   --no-service-sandboxing  skip the systemd sandboxing drop-in for fail2ban
 #   --no-journald          skip persistent + size-capped journald logging
+#   --no-su-restriction    skip restricting su to the sugroup group (pam_wheel)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -147,6 +153,7 @@ DO_FILE_PERMISSIONS=1
 DO_SSH_ACCESS=1
 DO_SERVICE_SANDBOXING=1
 DO_JOURNALD=1
+DO_SU_RESTRICTION=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -175,7 +182,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,122p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,126p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -208,6 +215,7 @@ parse_args() {
             --no-ssh-access)   DO_SSH_ACCESS=0; shift;;
             --no-service-sandboxing) DO_SERVICE_SANDBOXING=0; shift;;
             --no-journald)     DO_JOURNALD=0; shift;;
+            --no-su-restriction) DO_SU_RESTRICTION=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1456,6 +1464,43 @@ EOF
     fi
 }
 
+SU_PAM_FILE="/etc/pam.d/su"
+SU_GROUP="sugroup"
+
+setup_su_restriction() {
+    [ "$DO_SU_RESTRICTION" -eq 1 ] || { log "Skipping su restriction"; return 0; }
+    log "Restricting su to members of the '$SU_GROUP' group (CIS 5.7)"
+    # On a host with sudo, nobody should be running su: sudo logs per-command
+    # and is revocable per-user, su hands out whole shells against a shared
+    # password. pam_wheel makes group membership the gate BEFORE the password
+    # is even considered — a stolen root password alone no longer buys a
+    # shell. The group is created EMPTY on purpose (CIS suggests exactly
+    # that): admins use sudo, and the group is the explicit, auditable
+    # exception list. use_uid checks the real uid of the calling process,
+    # not getlogin() — which an attacker can spoof via utmp.
+    local line="auth       required   pam_wheel.so use_uid group=$SU_GROUP"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would create group %s and gate su on it in %s\n' "$c_yellow" "$c_reset" "$SU_GROUP" "$SU_PAM_FILE"
+        return 0
+    fi
+    if ! getent group "$SU_GROUP" >/dev/null 2>&1; then
+        groupadd --system "$SU_GROUP"
+    fi
+    if grep -Eq "^auth[[:space:]]+required[[:space:]]+pam_wheel\.so[[:space:]]+use_uid[[:space:]]+group=$SU_GROUP" "$SU_PAM_FILE"; then
+        ok "su already restricted to $SU_GROUP"
+        return 0
+    fi
+    # Debian ships the hint commented out — activate it in place so the
+    # stack keeps its documented order; otherwise insert right after
+    # pam_rootok (root itself never walks past that line anyway).
+    if grep -Eq '^#[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so[[:space:]]*$' "$SU_PAM_FILE"; then
+        sed -i -E "s|^#[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so[[:space:]]*$|$line|" "$SU_PAM_FILE"
+    else
+        sed -i -E "/^auth[[:space:]]+sufficient[[:space:]]+pam_rootok\.so/a $line" "$SU_PAM_FILE"
+    fi
+    ok "su now requires membership of '$SU_GROUP' (kept empty: use sudo — add a user only as a deliberate exception)"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1485,6 +1530,7 @@ main() {
     [ "$DO_SSH_ACCESS" -eq 1 ]      && echo "    - SSH login limited to the ssh-users group (admin included)"
     [ "$DO_SERVICE_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the fail2ban service"
     [ "$DO_JOURNALD" -eq 1 ]        && echo "    - persistent, size-capped journald logging"
+    [ "$DO_SU_RESTRICTION" -eq 1 ]  && echo "    - su restricted to the (empty) sugroup group"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1517,6 +1563,7 @@ main() {
     setup_ssh_access_control
     setup_service_sandboxing
     setup_journald
+    setup_su_restriction
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

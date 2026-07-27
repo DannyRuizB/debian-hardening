@@ -479,6 +479,73 @@ expect_line "journald caps its disk footprint (effective)" "^SystemMaxUse=" \
 expect_ok "the persistent journal directory exists on disk" \
   sudo test -d /var/log/journal
 
+echo "== Su restriction (CIS 5.7) =="
+expect_ok "the sugroup group exists" sudo getent group sugroup
+expect_line "pam.d/su gates su on sugroup membership by real uid" \
+  'pam_wheel\.so use_uid group=sugroup' \
+  "sudo grep -E '^auth[[:space:]]+required[[:space:]]+pam_wheel' /etc/pam.d/su"
+# CIS wants the group EMPTY: admins use sudo, so every member is a deliberate,
+# auditable exception. An empty group is the strongest form of the control.
+expect_line "the sugroup group is empty (sudo is the sanctioned path)" '^$' \
+  "sudo getent group sugroup | cut -d: -f4"
+# Behavioral, mirroring step 21's proof: the SAME user with the SAME *correct*
+# root password is refused outside the group and gets in inside it — so the
+# door is the membership, not the credential. Four traps shaped this harness:
+#  - Neither the exit code nor su's message discriminates: on the full
+#    baseline pam_faillock turns a failed password into "Permission denied"
+#    too, the very string pam_wheel produces. The journal doesn't either —
+#    with no password delivered, both cases log the same pam_unix failure.
+#    The only honest signal is whether the shell actually opens.
+#  - So the password has to really arrive, and a plain pipe never does: PAM
+#    flushes queued tty input (TCSAFLUSH) before reading. expect(1) drives a
+#    real pty and types AFTER the prompt, which is why it works where the
+#    faillock probe needed pamtester.
+#  - Never run it as root: pam_wheel waves uid 0 straight through, the same
+#    way pam_rootok defeats the faillock probe above.
+#  - Both probe passwords must satisfy step 15's policy (>= 14 chars, 4
+#    classes, and not containing the username — "Root" inside a root
+#    password is refused), or chpasswd quietly leaves the account without
+#    one and every attempt fails for the wrong reason.
+# root's locked hash is saved and restored right after, and re-asserted.
+SU_PASS='Qx7!vTz9#mLp2Wb'
+on_node "sudo userdel -r suprobe 2>/dev/null; sudo useradd -m suprobe && echo 'suprobe:Verify!Su9Probe#2026' | sudo chpasswd && sudo faillock --user suprobe --reset" >/dev/null 2>&1 || true
+root_hash=$(on_node "sudo getent shadow root | cut -d: -f2")
+on_node "echo 'root:$SU_PASS' | sudo chpasswd" >/dev/null 2>&1 || true
+# Heredoc over ssh stdin: no quoting maze, and the password stays in one place.
+on_node "sudo tee /tmp/su-probe.exp >/dev/null && sudo chmod 644 /tmp/su-probe.exp" <<EXP >/dev/null 2>&1
+set timeout 15
+spawn su - root -c id
+expect {
+  "Password:" { send "$SU_PASS\r"; exp_continue }
+  "uid=0" { puts "RESULT: IN"; exit 0 }
+  "Permission denied" { puts "RESULT: DENIED"; exit 1 }
+  "Authentication failure" { puts "RESULT: AUTHFAIL"; exit 2 }
+  timeout { puts "RESULT: TIMEOUT"; exit 3 }
+}
+EXP
+# PIPEFAIL TRAP (the one from step 11, in a new disguise): the refusal we are
+# testing for makes expect exit 1, ssh propagates it, and `su_try | grep -q`
+# would then report the pipeline as failed even though grep matched. Capture
+# the output first, match against the variable.
+su_try() { on_node "sudo -u suprobe expect -f /tmp/su-probe.exp 2>&1" || true; }
+out=$(su_try)
+case "$out" in
+  *"RESULT: DENIED"*) pass "a user outside sugroup is refused su even with the correct root password" ;;
+  *) fail "a user outside sugroup is refused su even with the correct root password" ;;
+esac
+on_node "sudo usermod -aG sugroup suprobe && sudo faillock --user suprobe --reset" >/dev/null 2>&1 || true
+out=$(su_try)
+case "$out" in
+  *"RESULT: IN"*) pass "the same user inside sugroup gets a root shell with the same password" ;;
+  *) fail "the same user inside sugroup gets a root shell with the same password" ;;
+esac
+on_node "sudo usermod -p '$root_hash' root; sudo rm -f /tmp/su-probe.exp" >/dev/null 2>&1 || true
+expect_line "root's password is locked again after the probe" '^[!*]' \
+  sudo bash -c "'getent shadow root | cut -d: -f2'"
+# Anti-lockout: root must keep its own su (pam_rootok is above pam_wheel).
+expect_ok "root can still su despite the restriction" sudo su - root -c true
+on_node "sudo gpasswd -d suprobe sugroup; sudo userdel -r suprobe" >/dev/null 2>&1 || true
+
 # LAST on purpose: banning the client cuts our own SSH access to the node.
 # Lift the shield installed at the top — from here on we WANT to be bannable.
 docker exec db-harden-node fail2ban-client set sshd delignoreip 172.17.0.1 >/dev/null 2>&1 || true

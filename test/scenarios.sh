@@ -229,6 +229,22 @@ got=$(val s17 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s17 >/dev/null 2>&1
 
+echo "-- 18. Skip a step: --no-su-restriction --------------------"
+fresh_node s18 >/dev/null
+docker exec s18 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-su-restriction -y >/dev/null 2>&1
+if docker exec s18 getent group sugroup >/dev/null 2>&1; then
+  F "--no-su-restriction should not create the sugroup group" "group exists"; else
+  P "--no-su-restriction -> no sugroup group"; fi
+# The pam.d/su hint must stay commented out, i.e. su stays open.
+if docker exec s18 grep -Eq '^auth[[:space:]]+required[[:space:]]+pam_wheel' /etc/pam.d/su 2>/dev/null; then
+  F "--no-su-restriction should leave pam.d/su untouched" "pam_wheel active"; else
+  P "--no-su-restriction -> pam_wheel stays inactive"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s18 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s18 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

@@ -33,8 +33,11 @@ cd test
 | 13 | `--no-rkhunter` | no rkhunter baseline / timer written, the rest still applies |
 | 14 | `--no-ssh-access` | no `AllowGroups` drop-in written, the rest still applies |
 | 15 | (no `--admin-user`) | the `AllowGroups` step refuses to run — an allow-list nobody satisfies would lock everyone out |
+| 16 | `--no-service-sandboxing` | no systemd drop-in for fail2ban, the rest still applies |
+| 17 | `--no-journald` | no journald drop-in written, the rest still applies |
+| 18 | `--no-su-restriction` | no `sugroup` group and `pam_wheel` stays inactive in `pam.d/su`, the rest still applies |
 
-**Result: 30/30 checks pass.**
+**Result: 33/33 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
