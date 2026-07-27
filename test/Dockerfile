@@ -10,12 +10,15 @@ ENV container=docker
 # fail2ban and unattended-upgrades, so the node needs to resolve packages.
 # libpwquality-tools ships pwscore, which the verify suite uses to prove the
 # password policy behaviorally (cron is here for the same reason: step 14).
+# expect drives a real pty for the su-restriction check: a piped password
+# never arrives (PAM flushes queued tty input), so verify.sh types it after
+# the prompt like a human would.
 # pamtester drives the real PAM login stack for the faillock lockout check —
 # piping a password into su never works (PAM flushes pending tty input).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        systemd systemd-sysv openssh-server sudo ca-certificates procps iproute2 cron \
-       libpwquality-tools pamtester
+       libpwquality-tools pamtester expect
 
 EXPOSE 22
 
