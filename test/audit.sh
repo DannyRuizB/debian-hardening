@@ -368,6 +368,33 @@ else
   W "no dedicated su group" "create one and reference it from pam_wheel (su restriction step)"
 fi
 
+echo "-- System accounts (CIS 5.4.2 / 6.2.9) ----------------------"
+# A service account with a real shell is a login waiting to happen: a valid
+# su target, a valid SSH target while password auth lives, and the landing
+# spot after the daemon running as it is compromised. root and the
+# sync/shutdown/halt trio are legitimate exceptions.
+shelled=$(on_node awk -F: '($3<=999 && $1!="root" && $1!="sync" && $1!="shutdown" && $1!="halt" && $7!="" && $7!~/(nologin|false)$/){print $1}' /etc/passwd | tr '\n' ' ')
+[ -z "$shelled" ] \
+  && P "no system account has a login shell" \
+  || W "system accounts with a login shell ($shelled)" "give them /usr/sbin/nologin (system-accounts step)"
+unlocked=$(on_node awk -F: '($2!~/^[!*]/ && $2!=""){print $1}' /etc/shadow | tr '\n' ' ')
+case " $unlocked " in
+  *" root "*) unlocked=$(printf '%s' "$unlocked" | tr ' ' '\n' | grep -v '^root$' | tr '\n' ' ');;
+esac
+if [ -z "$(printf '%s' "$unlocked" | tr -d ' ')" ]; then
+  P "every system account password is locked"
+else
+  # Human accounts legitimately have passwords: only flag the uid <= 999 ones.
+  sysunlocked=""
+  for u in $unlocked; do
+    uid=$(on_node getent passwd "$u" | cut -d: -f3)
+    [ -n "$uid" ] && [ "$uid" -le 999 ] 2>/dev/null && sysunlocked="$sysunlocked $u"
+  done
+  [ -z "$(printf '%s' "$sysunlocked" | tr -d ' ')" ] \
+    && P "every system account password is locked" \
+    || W "system accounts with a usable password ($sysunlocked)" "lock them with passwd -l (system-accounts step)"
+fi
+
 echo "-- Accounts & files -----------------------------------------"
 on_node getent group sudo | grep -qE ':.*[a-z]' \
   && P "A non-root sudo account exists ($(on_node getent group sudo | sed 's/.*://'))" \
