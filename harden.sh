@@ -118,6 +118,7 @@
 #   --no-service-sandboxing  skip the systemd sandboxing drop-in for fail2ban
 #   --no-journald          skip persistent + size-capped journald logging
 #   --no-su-restriction    skip restricting su to the sugroup group (pam_wheel)
+#   --no-system-accounts   skip locking system accounts (nologin shell + locked password)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -154,6 +155,7 @@ DO_SSH_ACCESS=1
 DO_SERVICE_SANDBOXING=1
 DO_JOURNALD=1
 DO_SU_RESTRICTION=1
+DO_SYSTEM_ACCOUNTS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -216,6 +218,7 @@ parse_args() {
             --no-service-sandboxing) DO_SERVICE_SANDBOXING=0; shift;;
             --no-journald)     DO_JOURNALD=0; shift;;
             --no-su-restriction) DO_SU_RESTRICTION=0; shift;;
+            --no-system-accounts) DO_SYSTEM_ACCOUNTS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1501,6 +1504,72 @@ setup_su_restriction() {
     ok "su now requires membership of '$SU_GROUP' (kept empty: use sudo — add a user only as a deliberate exception)"
 }
 
+# Accounts below this UID are the distro's service accounts (Debian's
+# SYS_UID_MAX); humans start at 1000 and are never touched by this step.
+SYSTEM_UID_MAX=999
+NOLOGIN_SHELL="/usr/sbin/nologin"
+# Historical exceptions CIS itself carves out: these accounts exist to run
+# their namesake command as a login shell and nothing else. `sync` is the
+# canonical example — logging in as it flushes buffers and exits.
+SYSTEM_ACCOUNT_KEEP=(root sync shutdown halt)
+
+setup_system_accounts() {
+    [ "$DO_SYSTEM_ACCOUNTS" -eq 1 ] || { log "Skipping system account lockdown"; return 0; }
+    log "Locking system accounts: non-login shell + locked password (CIS 5.4.2 / 6.2.9)"
+    # A service account with a real shell is a login waiting to happen: it is
+    # a valid `su` target, a valid SSH target while password auth lives, and
+    # the landing spot of choice after a service is compromised (the daemon
+    # already runs as it). Two independent gates, because either alone leaks:
+    # a locked password still lets in anything that skips PAM's auth stage
+    # (an SSH key dropped in ~/.ssh, `su -` from root, a cron entry), and a
+    # nologin shell still lets a password-only check "succeed" for services
+    # that authenticate without spawning a shell. Together the account can
+    # own files and run daemons but nobody can BE it interactively.
+    #
+    # Never touches: root (locking it bricks single-user recovery), the
+    # sudo-capable admin user, anything with uid >= 1000 (humans), and the
+    # sync/shutdown/halt trio whose whole purpose is a login shell.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would set %s on system accounts (uid <= %s) with a real shell and lock their passwords\n' \
+            "$c_yellow" "$c_reset" "$NOLOGIN_SHELL" "$SYSTEM_UID_MAX"
+        return 0
+    fi
+    local shelled=() locked=() name uid shell keep skip
+    while IFS=: read -r name _ uid _ _ _ shell; do
+        [ "$uid" -le "$SYSTEM_UID_MAX" ] 2>/dev/null || continue
+        [ -n "$ADMIN_USER" ] && [ "$name" = "$ADMIN_USER" ] && continue
+        skip=0
+        for keep in "${SYSTEM_ACCOUNT_KEEP[@]}"; do
+            [ "$name" = "$keep" ] && { skip=1; break; }
+        done
+        [ "$skip" -eq 1 ] && continue
+        # Shell: anything that isn't nologin/false can start a session.
+        case "$shell" in
+            */nologin|*/false|"") ;;
+            *) usermod -s "$NOLOGIN_SHELL" "$name" && shelled+=("$name:$shell");;
+        esac
+        # Password: 'L' is locked, 'NP' is no password at all (worse). Both
+        # get `passwd -l`, which prefixes the hash with '!' — reversible with
+        # `passwd -u` if an account ever legitimately needs to log in.
+        case "$(passwd -S "$name" 2>/dev/null | awk '{print $2}')" in
+            L) ;;
+            *) passwd -l "$name" >/dev/null 2>&1 && locked+=("$name");;
+        esac
+    done < /etc/passwd
+    if [ "${#shelled[@]}" -gt 0 ]; then
+        warn "replaced the login shell of ${#shelled[@]} system account(s) with $NOLOGIN_SHELL:"
+        printf '      %s\n' "${shelled[@]}"
+    else
+        ok "no system account had a login shell"
+    fi
+    if [ "${#locked[@]}" -gt 0 ]; then
+        warn "locked the password of ${#locked[@]} system account(s): ${locked[*]}"
+    else
+        ok "every system account password was already locked"
+    fi
+    ok "System accounts can own files and run daemons, but nobody can log in as them"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1531,6 +1600,7 @@ main() {
     [ "$DO_SERVICE_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the fail2ban service"
     [ "$DO_JOURNALD" -eq 1 ]        && echo "    - persistent, size-capped journald logging"
     [ "$DO_SU_RESTRICTION" -eq 1 ]  && echo "    - su restricted to the (empty) sugroup group"
+    [ "$DO_SYSTEM_ACCOUNTS" -eq 1 ] && echo "    - system accounts locked (nologin shell + locked password)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1564,6 +1634,7 @@ main() {
     setup_service_sandboxing
     setup_journald
     setup_su_restriction
+    setup_system_accounts
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
