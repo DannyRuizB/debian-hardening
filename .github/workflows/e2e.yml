@@ -44,6 +44,17 @@ jobs:
             useradd --system --shell /bin/bash --create-home dhsvc &&
             echo 'dhsvc:Plant3d!Svc#2026' | chpasswd"
 
+      # CIS 4.2.3 offenders: a world-readable log file, and rsyslog.conf's own
+      # FileCreateMode drifted to 0644 (one careless edit away on any box).
+      # The log-permissions step must sweep the file to 0640 AND re-impose
+      # 0640 on newly created logs via its drop-in — verify deletes syslog and
+      # proves the reborn file's mode, so this flips red to green for real.
+      - name: Plant log-permission offenders for step 26 to fix
+        run: |
+          docker exec db-harden-node bash -c "
+            touch /var/log/dh-app.log && chmod 666 /var/log/dh-app.log &&
+            sed -i 's/^\\\$FileCreateMode 0640/\\\$FileCreateMode 0644/' /etc/rsyslog.conf"
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \
@@ -52,7 +63,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd"
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \
