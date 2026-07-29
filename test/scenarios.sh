@@ -245,6 +245,27 @@ got=$(val s18 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s18 >/dev/null 2>&1
 
+echo "-- 19. Skip a step: --no-log-permissions -------------------"
+fresh_node s19 >/dev/null
+# Plant a world-readable log; with the step skipped it must KEEP its world-
+# read bit. (The file-permissions sweep still strips the o+w bit — that one
+# guards integrity everywhere; only the log step takes world-READ away.)
+docker exec s19 bash -c "touch /var/log/dh-app.log && chmod 666 /var/log/dh-app.log"
+docker exec s19 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-log-permissions -y >/dev/null 2>&1
+got=$(docker exec s19 stat -c %a /var/log/dh-app.log 2>/dev/null)
+case "$got" in
+  *4) P "--no-log-permissions -> planted log keeps its world-read bit ($got)";;
+  *)  F "--no-log-permissions should leave world-read on the planted log" "$got";;
+esac
+if docker exec s19 test -f /etc/rsyslog.d/99-hardening.conf 2>/dev/null; then
+  F "--no-log-permissions should not write the rsyslog drop-in" "file exists"; else
+  P "--no-log-permissions -> no rsyslog drop-in"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s19 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s19 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

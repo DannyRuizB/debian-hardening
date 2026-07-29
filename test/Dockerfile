@@ -15,10 +15,12 @@ ENV container=docker
 # the prompt like a human would.
 # pamtester drives the real PAM login stack for the faillock lockout check —
 # piping a password into su never works (PAM flushes pending tty input).
+# rsyslog is here for step 26: the log-permissions step pins its
+# FileCreateMode, and verify proves a freshly created log is born 0640.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        systemd systemd-sysv openssh-server sudo ca-certificates procps iproute2 cron \
-       libpwquality-tools pamtester expect
+       libpwquality-tools pamtester expect rsyslog
 
 EXPOSE 22
 

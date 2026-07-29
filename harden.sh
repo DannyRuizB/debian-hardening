@@ -119,6 +119,7 @@
 #   --no-journald          skip persistent + size-capped journald logging
 #   --no-su-restriction    skip restricting su to the sugroup group (pam_wheel)
 #   --no-system-accounts   skip locking system accounts (nologin shell + locked password)
+#   --no-log-permissions   skip log file permissions (/var/log sweep + rsyslog create mode)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -156,6 +157,7 @@ DO_SERVICE_SANDBOXING=1
 DO_JOURNALD=1
 DO_SU_RESTRICTION=1
 DO_SYSTEM_ACCOUNTS=1
+DO_LOG_PERMISSIONS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -184,7 +186,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,126p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,127p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -219,6 +221,7 @@ parse_args() {
             --no-journald)     DO_JOURNALD=0; shift;;
             --no-su-restriction) DO_SU_RESTRICTION=0; shift;;
             --no-system-accounts) DO_SYSTEM_ACCOUNTS=0; shift;;
+            --no-log-permissions) DO_LOG_PERMISSIONS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1570,6 +1573,90 @@ setup_system_accounts() {
     ok "System accounts can own files and run daemons, but nobody can log in as them"
 }
 
+# ---- Step 26: log file permissions (CIS 4.2.3) ----------------------------
+RSYSLOG_DROPIN=/etc/rsyslog.d/99-hardening.conf
+
+setup_log_permissions() {
+    [ "$DO_LOG_PERMISSIONS" -eq 1 ] || { log "Skipping log file permissions"; return 0; }
+    log "Restricting log file permissions (CIS 4.2.3)"
+    # Logs are the forensic record AND a reconnaissance goldmine: auth.log
+    # says who logs in from where and which attempts fail, dpkg.log lists
+    # the exact package versions to shop CVEs for (and ships 644 on stock
+    # Debian). The file-permissions step already guards log INTEGRITY (its
+    # world-writable sweep is filesystem-wide); this step adds
+    # CONFIDENTIALITY: nothing under /var/log stays readable to everyone.
+    # The deliberate exceptions are the utmp family, world-readable BY
+    # DESIGN so `who`/`last` work for non-root users — wtmp and lastlog
+    # keep 664 root:utmp, while btmp gets 660: failed logins famously
+    # record usernames typed into the password prompt.
+    #
+    # Two halves on purpose: fix the files that exist today, then teach
+    # rsyslog to create tomorrow's files restricted too — a sweep without
+    # the second half rots on the next logrotate cycle.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would tighten /var/log (g-wx,o-rwx; utmp family pinned) and pin rsyslog FileCreateMode 0640\n' \
+            "$c_yellow" "$c_reset"
+        return 0
+    fi
+
+    # The utmp family first, pinned to their exact intended modes.
+    local f
+    for f in /var/log/wtmp /var/log/lastlog; do
+        [ -f "$f" ] && { chown root:utmp "$f"; chmod 664 "$f"; }
+    done
+    [ -f /var/log/btmp ] && { chown root:utmp /var/log/btmp; chmod 660 /var/log/btmp; }
+    # Rotated siblings (wtmp.1, btmp.1, ...) keep the same split.
+    find /var/log -maxdepth 1 -type f \( -name 'wtmp.*' -o -name 'lastlog.*' \) \
+        -exec chown root:utmp {} + -exec chmod 664 {} + 2>/dev/null || true
+    find /var/log -maxdepth 1 -type f -name 'btmp.*' \
+        -exec chown root:utmp {} + -exec chmod 660 {} + 2>/dev/null || true
+
+    # Everything else: strip group-write/exec and ALL world access. Owner
+    # bits and ownership stay (a www-data log keeps belonging to www-data);
+    # files already tighter than 640 are left alone. Only files with a bit
+    # to lose are touched, so the count below reports real work and the
+    # second run finds nothing to do.
+    local tightened
+    tightened=$(find /var/log -xdev -type f \
+        ! -name 'wtmp*' ! -name 'btmp*' ! -name 'lastlog*' \
+        -perm /0037 -print -exec chmod g-wx,o-rwx {} + | wc -l)
+    if [ "$tightened" -gt 0 ]; then
+        warn "tightened $tightened log file(s) that were group-writable or world-accessible"
+    else
+        ok "no log file was group-writable or world-accessible"
+    fi
+
+    # Future logs: rsyslog creates files with FileCreateMode. Debian's stock
+    # rsyslog.conf already says 0640 — but that is one drifted edit away
+    # from 644-for-everyone, and a drop-in loaded after the main file wins
+    # over whatever that line has become (verified against a live daemon).
+    # Only written when rsyslog is installed: on journald-only boxes the
+    # journald step already owns logging, and journal files are 640 by design.
+    if command -v rsyslogd >/dev/null 2>&1; then
+        local desired
+        desired="# Debian hardening: log files rsyslog creates from now on are born 0640
+# (directories 0750). Loaded after rsyslog.conf, so this wins over a
+# drifted FileCreateMode there. Existing files are swept by harden.sh.
+\$FileCreateMode 0640
+\$DirCreateMode 0750"
+        if [ ! -f "$RSYSLOG_DROPIN" ] || [ "$(cat "$RSYSLOG_DROPIN")" != "$desired" ]; then
+            printf '%s\n' "$desired" > "$RSYSLOG_DROPIN"
+            if rsyslogd -N1 >/dev/null 2>&1; then
+                systemctl restart rsyslog >/dev/null 2>&1 || warn "could not restart rsyslog (mode applies on next restart)"
+                ok "rsyslog now creates log files 0640 (drop-in wins over config drift)"
+            else
+                rm -f "$RSYSLOG_DROPIN"
+                warn "rsyslog rejected the drop-in — reverted, existing config untouched"
+            fi
+        else
+            ok "rsyslog FileCreateMode drop-in already in place"
+        fi
+    else
+        ok "rsyslog not installed — journald owns logging (hardened by the journald step)"
+    fi
+    ok "Logs stay readable to their service and root — not to every local user"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1601,6 +1688,7 @@ main() {
     [ "$DO_JOURNALD" -eq 1 ]        && echo "    - persistent, size-capped journald logging"
     [ "$DO_SU_RESTRICTION" -eq 1 ]  && echo "    - su restricted to the (empty) sugroup group"
     [ "$DO_SYSTEM_ACCOUNTS" -eq 1 ] && echo "    - system accounts locked (nologin shell + locked password)"
+    [ "$DO_LOG_PERMISSIONS" -eq 1 ] && echo "    - log file permissions (/var/log sweep + rsyslog create mode)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1635,6 +1723,7 @@ main() {
     setup_journald
     setup_su_restriction
     setup_system_accounts
+    setup_log_permissions
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
