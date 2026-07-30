@@ -17,10 +17,13 @@ ENV container=docker
 # piping a password into su never works (PAM flushes pending tty input).
 # rsyslog is here for step 26: the log-permissions step pins its
 # FileCreateMode, and verify proves a freshly created log is born 0640.
+# logrotate is here for step 27: stock Debian snippets (dpkg, alternatives)
+# re-create their logs 644, and verify forces a real rotation to prove the
+# tightened create modes hold.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        systemd systemd-sysv openssh-server sudo ca-certificates procps iproute2 cron \
-       libpwquality-tools pamtester expect rsyslog
+       libpwquality-tools pamtester expect rsyslog logrotate
 
 EXPOSE 22
 

@@ -266,6 +266,24 @@ got=$(val s19 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s19 >/dev/null 2>&1
 
+echo "-- 20. Skip a step: --no-logrotate-perms --------------------"
+fresh_node s20 >/dev/null
+# Stock Debian is its own offender here: the global create is bare and the
+# dpkg snippet says `create 644 root root`. With the step skipped, both must
+# stay exactly as the distro shipped them.
+docker exec s20 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-logrotate-perms -y >/dev/null 2>&1
+if docker exec s20 grep -Eqs '^[[:space:]]*create[[:space:]]*$' /etc/logrotate.conf; then
+  P "--no-logrotate-perms -> global create stays bare (stock)"; else
+  F "--no-logrotate-perms should leave the bare global create alone" "$(docker exec s20 grep -E '^[[:space:]]*create' /etc/logrotate.conf 2>/dev/null)"; fi
+if docker exec s20 grep -qs 'create 644 root root' /etc/logrotate.d/dpkg 2>/dev/null; then
+  P "--no-logrotate-perms -> dpkg snippet keeps its stock create 644"; else
+  F "--no-logrotate-perms should leave the dpkg create mode alone" "$(docker exec s20 grep create /etc/logrotate.d/dpkg 2>/dev/null)"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s20 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s20 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
