@@ -120,6 +120,7 @@
 #   --no-su-restriction    skip restricting su to the sugroup group (pam_wheel)
 #   --no-system-accounts   skip locking system accounts (nologin shell + locked password)
 #   --no-log-permissions   skip log file permissions (/var/log sweep + rsyslog create mode)
+#   --no-logrotate-perms   skip logrotate hardening (rotated logs re-created 0640)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -158,6 +159,7 @@ DO_JOURNALD=1
 DO_SU_RESTRICTION=1
 DO_SYSTEM_ACCOUNTS=1
 DO_LOG_PERMISSIONS=1
+DO_LOGROTATE_PERMS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -186,7 +188,7 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,127p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,128p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -222,6 +224,7 @@ parse_args() {
             --no-su-restriction) DO_SU_RESTRICTION=0; shift;;
             --no-system-accounts) DO_SYSTEM_ACCOUNTS=0; shift;;
             --no-log-permissions) DO_LOG_PERMISSIONS=0; shift;;
+            --no-logrotate-perms) DO_LOGROTATE_PERMS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1657,6 +1660,105 @@ setup_log_permissions() {
     ok "Logs stay readable to their service and root — not to every local user"
 }
 
+# ---- Step 27: logrotate permissions (CIS 4.4) -----------------------------
+
+# Rewrites every `create MODE [owner group]` line in FILE whose mode grants
+# group-write/exec or any world access (the same g-wx,o-rwx threshold as the
+# /var/log sweep); owner and group arguments are never touched. Prints how
+# many distinct modes it tightened.
+tighten_create_modes() {
+    local file=$1 mode dec new count=0
+    while IFS= read -r mode; do
+        [ -n "$mode" ] || continue
+        dec=$((8#$mode))
+        [ $((dec & 8#0037)) -ne 0 ] || continue
+        new=$(printf '%04o' $((dec & ~8#0037)))
+        sed -i -E "s/^([[:space:]]*create[[:space:]]+)${mode}\b/\1${new}/" "$file"
+        count=$((count + 1))
+    done < <(grep -E '^[[:space:]]*create[[:space:]]+[0-7]{3,4}\b' "$file" 2>/dev/null \
+             | awk '{print $2}' | sort -u)
+    echo "$count"
+}
+
+setup_logrotate_perms() {
+    [ "$DO_LOGROTATE_PERMS" -eq 1 ] || { log "Skipping logrotate permissions"; return 0; }
+    log "Making logrotate re-create logs restricted (CIS 4.4)"
+    # Rotation is the THIRD way a log file is born (after the service and
+    # rsyslog, both handled by the log-permissions step): logrotate's
+    # `create` directive decides the mode of every file it re-creates, and
+    # stock Debian ships offenders — dpkg and alternatives say `create 644
+    # root root`, so the dpkg.log the sweep just tightened comes back
+    # world-readable on the next monthly cycle. Two moves, same shape as
+    # the sweep: pin the GLOBAL create in logrotate.conf (stock is a bare
+    # `create`, which CLONES the rotated file's mode — drift-preserving),
+    # then tighten any per-package snippet whose own create grants
+    # group-write or world access. Mode only, on purpose: owner/group
+    # arguments stay, so a service's log keeps belonging to the service.
+    # The wtmp/btmp snippets keep their designed utmp split (664/660
+    # root:utmp) — the same exception the sweep makes.
+    if ! command -v logrotate >/dev/null 2>&1; then
+        ok "logrotate not installed — nothing re-creates rotated logs"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would pin the global create to 0640 and strip g-wx,o-rwx from logrotate.d create modes (wtmp/btmp pinned)\n' \
+            "$c_yellow" "$c_reset"
+        return 0
+    fi
+
+    # Snapshot, edit, validate with logrotate's own parser, restore on
+    # rejection — the same honesty as the rsyslog drop-in.
+    local stash
+    stash=$(mktemp -d)
+    cp -a /etc/logrotate.conf "$stash/logrotate.conf"
+    cp -a /etc/logrotate.d "$stash/logrotate.d"
+
+    local global_changed=0 snips=0 snip n
+    if grep -Eq '^[[:space:]]*create[[:space:]]*$' /etc/logrotate.conf; then
+        sed -i -E 's/^([[:space:]]*)create[[:space:]]*$/\1create 0640/' /etc/logrotate.conf
+        global_changed=1
+    elif grep -Eq '^[[:space:]]*create[[:space:]]+[0-7]{3,4}\b' /etc/logrotate.conf; then
+        n=$(tighten_create_modes /etc/logrotate.conf)
+        [ "$n" -gt 0 ] && global_changed=1
+    else
+        # No global create at all: add one ABOVE the include, so every
+        # snippet defined after it inherits the default (a global at the
+        # end of the file would apply to nothing).
+        sed -i -E '0,/^[[:space:]]*include\b/s//create 0640\n&/' /etc/logrotate.conf
+        grep -Eq '^create 0640$' /etc/logrotate.conf || printf 'create 0640\n' >> /etc/logrotate.conf
+        global_changed=1
+    fi
+
+    for snip in /etc/logrotate.d/*; do
+        [ -f "$snip" ] || continue
+        case "$(basename "$snip")" in wtmp|btmp) continue;; esac
+        n=$(tighten_create_modes "$snip")
+        [ "$n" -gt 0 ] && snips=$((snips + 1))
+    done
+
+    if ! logrotate -d /etc/logrotate.conf >/dev/null 2>&1; then
+        cp -a "$stash/logrotate.conf" /etc/logrotate.conf
+        rm -rf /etc/logrotate.d
+        cp -a "$stash/logrotate.d" /etc/logrotate.d
+        rm -rf "$stash"
+        warn "logrotate rejected the edited config — restored, nothing changed"
+        return 0
+    fi
+    rm -rf "$stash"
+
+    if [ "$global_changed" -eq 1 ]; then
+        warn "global create pinned to 0640 (mode only — owner/group stay per file)"
+    else
+        ok "global create already restrictive"
+    fi
+    if [ "$snips" -gt 0 ]; then
+        warn "tightened loose create modes in $snips logrotate.d snippet(s)"
+    else
+        ok "no logrotate.d snippet re-creates logs with loose permissions"
+    fi
+    ok "Rotation re-creates logs restricted — the sweep no longer rots on rotate"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1689,6 +1791,7 @@ main() {
     [ "$DO_SU_RESTRICTION" -eq 1 ]  && echo "    - su restricted to the (empty) sugroup group"
     [ "$DO_SYSTEM_ACCOUNTS" -eq 1 ] && echo "    - system accounts locked (nologin shell + locked password)"
     [ "$DO_LOG_PERMISSIONS" -eq 1 ] && echo "    - log file permissions (/var/log sweep + rsyslog create mode)"
+    [ "$DO_LOGROTATE_PERMS" -eq 1 ] && echo "    - logrotate permissions (rotated logs re-created 0640)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1724,6 +1827,7 @@ main() {
     setup_su_restriction
     setup_system_accounts
     setup_log_permissions
+    setup_logrotate_perms
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

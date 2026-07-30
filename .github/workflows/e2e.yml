@@ -55,6 +55,17 @@ jobs:
             touch /var/log/dh-app.log && chmod 666 /var/log/dh-app.log &&
             sed -i 's/^\\\$FileCreateMode 0640/\\\$FileCreateMode 0644/' /etc/rsyslog.conf"
 
+      # CIS 4.4 offender: a logrotate snippet that re-creates its log 0666.
+      # Stock Debian already offends on its own (bare global create, dpkg and
+      # alternatives at 644) — this one is the evergreen guarantee should the
+      # distro ever clean up: the logrotate-perms step must tighten it to
+      # 0640 while keeping the owner/group arguments untouched.
+      - name: Plant a logrotate offender for step 27 to tighten
+        run: |
+          docker exec db-harden-node bash -c "
+            touch /var/log/dh-rotated.log &&
+            printf '/var/log/dh-rotated.log {\n  weekly\n  rotate 2\n  create 0666 root adm\n}\n' > /etc/logrotate.d/dh-rotated"
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \
@@ -63,7 +74,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf"
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \

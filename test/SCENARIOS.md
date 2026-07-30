@@ -37,8 +37,9 @@ cd test
 | 17 | `--no-journald` | no journald drop-in written, the rest still applies |
 | 18 | `--no-su-restriction` | no `sugroup` group and `pam_wheel` stays inactive in `pam.d/su`, the rest still applies |
 | 19 | `--no-log-permissions` | a planted world-readable log keeps its world-read bit (the file-permissions sweep only strips `o+w`) and no rsyslog drop-in is written, the rest still applies |
+| 20 | `--no-logrotate-perms` | stock Debian is its own offender: the bare global `create` and dpkg's `create 644 root root` must stay exactly as the distro shipped them, the rest still applies |
 
-**Result: 36/36 checks pass.**
+**Result: 39/39 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
