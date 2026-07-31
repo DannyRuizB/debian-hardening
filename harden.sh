@@ -84,6 +84,22 @@
 #      even considered — a stolen root password alone no longer buys a
 #      shell. The group is created EMPTY on purpose: admins use sudo, and
 #      the group is the explicit, auditable exception list.
+#  25. System accounts (CIS 5.4): every service account gets a nologin
+#      shell and a locked password, so a daemon identity can never become
+#      an interactive login.
+#  26. Log file permissions (CIS 4.2.3): everything under /var/log loses
+#      group-write and all world access (utmp family excepted by design),
+#      and an rsyslog drop-in pins FileCreateMode 0640 so tomorrow's files
+#      are born restricted too.
+#  27. Logrotate permissions (CIS 4.4): the global `create` is pinned to
+#      0640 and loose per-package create modes are tightened, so rotation
+#      (the third way a log is born) re-creates logs restricted.
+#  28. Audit daemon (CIS 4.1): auditd installed with a staged ruleset —
+#      identity files, sudoers, sshd config, time changes and kernel module
+#      syscalls all leave a kernel-level trail keyed for ausearch. Config is
+#      the promise (package, rules, enabled at boot); loading into the
+#      running kernel is best-effort, because containers have no audit
+#      netlink and real servers activate the rules on their next boot.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -121,6 +137,7 @@
 #   --no-system-accounts   skip locking system accounts (nologin shell + locked password)
 #   --no-log-permissions   skip log file permissions (/var/log sweep + rsyslog create mode)
 #   --no-logrotate-perms   skip logrotate hardening (rotated logs re-created 0640)
+#   --no-auditd            skip the audit daemon (staged ruleset + enabled at boot)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -160,6 +177,7 @@ DO_SU_RESTRICTION=1
 DO_SYSTEM_ACCOUNTS=1
 DO_LOG_PERMISSIONS=1
 DO_LOGROTATE_PERMS=1
+DO_AUDITD=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -225,6 +243,7 @@ parse_args() {
             --no-system-accounts) DO_SYSTEM_ACCOUNTS=0; shift;;
             --no-log-permissions) DO_LOG_PERMISSIONS=0; shift;;
             --no-logrotate-perms) DO_LOGROTATE_PERMS=0; shift;;
+            --no-auditd) DO_AUDITD=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1759,6 +1778,116 @@ setup_logrotate_perms() {
     ok "Rotation re-creates logs restricted — the sweep no longer rots on rotate"
 }
 
+# ---- Step 28: audit daemon (CIS 4.1) ---------------------------------------
+
+AUDIT_RULES="/etc/audit/rules.d/hardening.rules"
+AUDITD_CONF="/etc/audit/auditd.conf"
+
+# Pin `key = value` in an auditd.conf-style file: replace the line when the
+# key exists (whatever its current value or spacing), append when it doesn't.
+# Factored out for the bats probe: pure file edit, no service side effects.
+pin_auditd_key() {
+    local file=$1 key=$2 value=$3
+    if grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$file"; then
+        sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" "$file"
+    else
+        printf '%s = %s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+setup_auditd() {
+    [ "$DO_AUDITD" -eq 1 ] || { log "Skipping auditd"; return 0; }
+    log "Installing auditd with a staged ruleset (CIS 4.1)"
+    # The logging chapter's last piece: journald (23) keeps logs, the sweep
+    # (26) guards them, logrotate (27) re-creates them right — auditd records
+    # WHO touched the crown jewels, at the kernel, as it happens. AIDE (16)
+    # notices a watched file changed by the next daily check; the audit trail
+    # says which process, which uid, which syscall, the moment it happened.
+    #
+    # The split that keeps this honest: the PROMISE is configuration —
+    # package installed, ruleset staged in rules.d, service enabled at boot,
+    # history kept. LOADING the rules into the running kernel is best-effort
+    # on purpose: the audit netlink is not namespaced, so inside a container
+    # (this repo's CI node, WSL) auditctl gets EPERM no matter what — while
+    # on any real server the enabled service compiles and loads the staged
+    # rules on the next boot. A hard failure here would abort the whole run
+    # over an environment limitation, not a hardening problem.
+    local rules_content
+    rules_content=$(cat <<'EOF'
+# hardening.rules — staged by harden.sh (step 28, CIS 4.1).
+# augenrules compiles every rules.d file into /etc/audit/audit.rules when
+# the service starts. Keys (-k) are what you hand to `ausearch -k`.
+
+## Self-protection: the audit config and its logs are themselves watched.
+-w /etc/audit/ -p wa -k auditconfig
+-w /var/log/audit/ -p wa -k auditlog
+
+## Identity (CIS 4.1.3): every write to the account database is recorded.
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+
+## Privilege scope: sudoers edits are never silent.
+-w /etc/sudoers -p wa -k scope
+-w /etc/sudoers.d/ -p wa -k scope
+
+## The door: sshd configuration (including this repo's own drop-ins).
+-w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+
+## Time manipulation is log forgery 101: both arches, plus the zone file.
+-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change
+-a always,exit -F arch=b32 -S adjtimex,settimeofday,clock_settime -k time-change
+-w /etc/localtime -p wa -k time-change
+
+## Kernel modules: loading code into the kernel is always worth a line.
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k modules
+-a always,exit -F arch=b32 -S init_module,finit_module,delete_module -k modules
+
+# No `-e 2` (immutable) on purpose: this script is safe to re-run, and an
+# immutable config would make every later rule change need a reboot. Flip
+# it yourself once the ruleset is final on a production box.
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would install auditd, stage %s, pin keep_logs/syslog in auditd.conf and enable the service\n' \
+            "$c_yellow" "$c_reset" "$AUDIT_RULES"
+        return 0
+    fi
+    command -v auditctl >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive run apt-get install -y auditd
+    install -d -m 750 /etc/audit/rules.d
+    if [ ! -f "$AUDIT_RULES" ] || [ "$(cat "$AUDIT_RULES")" != "$rules_content" ]; then
+        printf '%s\n' "$rules_content" > "$AUDIT_RULES"
+        warn "audit ruleset staged at $AUDIT_RULES"
+    else
+        ok "audit ruleset already staged"
+    fi
+    chmod 0640 "$AUDIT_RULES"
+    chown root:root "$AUDIT_RULES"
+
+    # auditd.conf (CIS 4.1.2): keep the history instead of silently rotating
+    # it away, and shout to syslog when disk space runs low. syslog rather
+    # than the benchmark's email: it needs no mail stack and lands in the
+    # journal this baseline already made persistent.
+    if [ -f "$AUDITD_CONF" ]; then
+        pin_auditd_key "$AUDITD_CONF" max_log_file_action keep_logs
+        pin_auditd_key "$AUDITD_CONF" space_left_action syslog
+        ok "audit history kept (keep_logs) and low-space warnings go to syslog"
+    else
+        warn "$AUDITD_CONF not found — package layout changed?"
+    fi
+
+    systemctl enable auditd >/dev/null 2>&1 || warn "could not enable auditd (no systemd?)"
+    if augenrules --load >/dev/null 2>&1; then
+        ok "audit rules loaded into the running kernel"
+    else
+        warn "kernel audit netlink not reachable (container/WSL) — the enabled service loads the staged rules at boot on real hardware"
+    fi
+    ok "auditd staged: identity, sudoers, sshd, time and module syscalls leave a trail"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1792,6 +1921,7 @@ main() {
     [ "$DO_SYSTEM_ACCOUNTS" -eq 1 ] && echo "    - system accounts locked (nologin shell + locked password)"
     [ "$DO_LOG_PERMISSIONS" -eq 1 ] && echo "    - log file permissions (/var/log sweep + rsyslog create mode)"
     [ "$DO_LOGROTATE_PERMS" -eq 1 ] && echo "    - logrotate permissions (rotated logs re-created 0640)"
+    [ "$DO_AUDITD" -eq 1 ]           && echo "    - auditd: staged audit ruleset, enabled at boot"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1828,6 +1958,7 @@ main() {
     setup_system_accounts
     setup_log_permissions
     setup_logrotate_perms
+    setup_auditd
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
