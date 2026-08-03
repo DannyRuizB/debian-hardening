@@ -100,6 +100,12 @@
 #      the promise (package, rules, enabled at boot); loading into the
 #      running kernel is best-effort, because containers have no audit
 #      netlink and real servers activate the rules on their next boot.
+#  29. Home directory permissions (CIS 6.2): every interactive user's home
+#      loses group-write and all world access (750 or tighter), and the
+#      legacy credential files that grant passwordless login — .netrc,
+#      .rhosts, .forward — are removed. A 755 home is the default on many
+#      distros and it hands every local account a reading pass over
+#      ~/.ssh, ~/.aws and shell history.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -138,6 +144,7 @@
 #   --no-log-permissions   skip log file permissions (/var/log sweep + rsyslog create mode)
 #   --no-logrotate-perms   skip logrotate hardening (rotated logs re-created 0640)
 #   --no-auditd            skip the audit daemon (staged ruleset + enabled at boot)
+#   --no-home-permissions  skip home directory permissions (750 + legacy dotfiles)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -178,6 +185,7 @@ DO_SYSTEM_ACCOUNTS=1
 DO_LOG_PERMISSIONS=1
 DO_LOGROTATE_PERMS=1
 DO_AUDITD=1
+DO_HOME_PERMISSIONS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -206,7 +214,11 @@ run() {
 }
 
 # ---- Arg parsing ----------------------------------------------------------
-usage() { sed -n '2,145p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+# Print the header comment block, from line 2 to the `-h, --help` line that
+# ends it. The range used to be hard-coded and went stale twice — every time
+# the header grew, the help silently lost its tail — so it ends on a pattern
+# now: the last option line is the last option line, whatever number it is.
+usage() { sed -n '2,/^#   -h, --help/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Parse argv into the global flags. Kept as a function (rather than top-level
 # code) so the script can be sourced for unit tests without running it.
@@ -244,6 +256,7 @@ parse_args() {
             --no-log-permissions) DO_LOG_PERMISSIONS=0; shift;;
             --no-logrotate-perms) DO_LOGROTATE_PERMS=0; shift;;
             --no-auditd) DO_AUDITD=0; shift;;
+            --no-home-permissions) DO_HOME_PERMISSIONS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1888,6 +1901,78 @@ EOF
     ok "auditd staged: identity, sudoers, sshd, time and module syscalls leave a trail"
 }
 
+# ---- Step 29: home directory permissions (CIS 6.2) -------------------------
+
+# Legacy dotfiles that grant access without a password: .netrc stores
+# cleartext logins (and ftp/curl read it), .rhosts and .shosts are the
+# rlogin trust files that let a named remote user in with no credential at
+# all, and .forward silently ships a user's mail elsewhere. All four are
+# relics; none has a legitimate place on a hardened server.
+HOME_LEGACY_FILES=".netrc .rhosts .shosts .forward"
+
+# Interactive users' homes, one "user:home" pair per line. Interactive means
+# uid >= 1000 (system accounts got their own treatment in step 25) with a
+# real shell, plus root — whose /root ships 700 on Debian and stays out of
+# the uid sweep. Homes that don't exist yet are skipped: a home that isn't
+# there has no permissions to fix.
+interactive_homes() {
+    awk -F: '($3 >= 1000 && $7 !~ /(nologin|false)$/) || $1 == "root" { print $1 ":" $6 }' /etc/passwd |
+        while IFS=: read -r user home; do
+            # if-fi, not `&&`: a trailing missing home must not turn into a
+            # non-zero exit for the whole pipeline (set -e is watching).
+            if [ -n "$home" ] && [ -d "$home" ]; then
+                printf '%s:%s\n' "$user" "$home"
+            fi
+        done
+}
+
+setup_home_permissions() {
+    [ "$DO_HOME_PERMISSIONS" -eq 1 ] || { log "Skipping home directory permissions"; return 0; }
+    log "Tightening home directories (CIS 6.2)"
+    # A home directory is the last place default permissions should be
+    # generous, and 755 is exactly what most distros create: every local
+    # account — including the service accounts step 25 just locked, and
+    # anything that gets a shell through a compromised daemon — can read
+    # ~/.ssh, ~/.aws, ~/.kube, the shell history with the password someone
+    # typed at the wrong prompt. Group-write is worse: on a distro with
+    # USERGROUPS_ENAB the group is the user's own, but on a shared-group
+    # setup it hands teammates write access to each other's dotfiles, and a
+    # writable ~/.bashrc is code execution as that user at the next login.
+    # Mode only, ownership untouched: adopting a home to root would break
+    # the login it exists for.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would strip g-w,o-rwx from interactive home directories and remove %s\n' \
+            "$c_yellow" "$c_reset" "$HOME_LEGACY_FILES"
+        return 0
+    fi
+    local pair user home mode tightened=0 removed=0 f
+    while IFS= read -r pair; do
+        [ -n "$pair" ] || continue
+        user=${pair%%:*}
+        home=${pair#*:}
+        mode=$(stat -c '%a' "$home" 2>/dev/null) || continue
+        # Anything looser than 750 in the group/other bits gets trimmed;
+        # a home that is already 700 or 750 is left exactly as it is.
+        if [ $((8#$mode & 8#0027)) -ne 0 ]; then
+            chmod g-w,o-rwx "$home"
+            warn "$home was $mode — tightened to $(stat -c '%a' "$home") ($user)"
+            tightened=$((tightened + 1))
+        fi
+        for f in $HOME_LEGACY_FILES; do
+            if [ -e "$home/$f" ]; then
+                rm -f "$home/$f"
+                warn "removed $home/$f — passwordless access / mail forwarding relic"
+                removed=$((removed + 1))
+            fi
+        done
+    done <<EOF
+$(interactive_homes)
+EOF
+    [ "$tightened" -eq 0 ] && ok "every interactive home is already 750 or tighter"
+    [ "$removed" -eq 0 ] && ok "no .netrc / .rhosts / .shosts / .forward files present"
+    ok "Home directories are private to their owner"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -1922,6 +2007,7 @@ main() {
     [ "$DO_LOG_PERMISSIONS" -eq 1 ] && echo "    - log file permissions (/var/log sweep + rsyslog create mode)"
     [ "$DO_LOGROTATE_PERMS" -eq 1 ] && echo "    - logrotate permissions (rotated logs re-created 0640)"
     [ "$DO_AUDITD" -eq 1 ]           && echo "    - auditd: staged audit ruleset, enabled at boot"
+    [ "$DO_HOME_PERMISSIONS" -eq 1 ] && echo "    - home directory permissions (750 + legacy credential dotfiles removed)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -1959,6 +2045,7 @@ main() {
     setup_log_permissions
     setup_logrotate_perms
     setup_auditd
+    setup_home_permissions
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

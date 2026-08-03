@@ -34,6 +34,7 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
   [[ "$output" == *"--no-log-permissions"* ]]
   [[ "$output" == *"--no-logrotate-perms"* ]]
   [[ "$output" == *"--no-auditd"* ]]
+  [[ "$output" == *"--no-home-permissions"* ]]
   [[ "$output" == *"-h, --help"* ]]
 }
 
@@ -70,8 +71,8 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
 }
 
 @test "the per-step --no-* flags each set their toggle to 0" {
-  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening --no-ssh-policies --no-coredump-limits --no-umask-tmout --no-cron-restrictions --no-password-policy --no-aide --no-rkhunter --no-module-blacklist --no-faillock --no-file-permissions --no-ssh-access --no-service-sandboxing --no-journald --no-su-restriction --no-system-accounts --no-log-permissions --no-logrotate-perms --no-auditd; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING \$DO_SSH_POLICIES \$DO_COREDUMP_LIMITS \$DO_UMASK_TMOUT \$DO_CRON_RESTRICTIONS \$DO_PASSWORD_POLICY \$DO_AIDE \$DO_RKHUNTER \$DO_MODULE_BLACKLIST \$DO_FAILLOCK \$DO_FILE_PERMISSIONS \$DO_SSH_ACCESS \$DO_SERVICE_SANDBOXING \$DO_JOURNALD \$DO_SU_RESTRICTION \$DO_SYSTEM_ACCOUNTS \$DO_LOG_PERMISSIONS \$DO_LOGROTATE_PERMS \$DO_AUDITD\""
-  [ "$output" = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" ]
+  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening --no-ssh-policies --no-coredump-limits --no-umask-tmout --no-cron-restrictions --no-password-policy --no-aide --no-rkhunter --no-module-blacklist --no-faillock --no-file-permissions --no-ssh-access --no-service-sandboxing --no-journald --no-su-restriction --no-system-accounts --no-log-permissions --no-logrotate-perms --no-auditd --no-home-permissions; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING \$DO_SSH_POLICIES \$DO_COREDUMP_LIMITS \$DO_UMASK_TMOUT \$DO_CRON_RESTRICTIONS \$DO_PASSWORD_POLICY \$DO_AIDE \$DO_RKHUNTER \$DO_MODULE_BLACKLIST \$DO_FAILLOCK \$DO_FILE_PERMISSIONS \$DO_SSH_ACCESS \$DO_SERVICE_SANDBOXING \$DO_JOURNALD \$DO_SU_RESTRICTION \$DO_SYSTEM_ACCOUNTS \$DO_LOG_PERMISSIONS \$DO_LOGROTATE_PERMS \$DO_AUDITD \$DO_HOME_PERMISSIONS\""
+  [ "$output" = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" ]
 }
 
 @test "--allow-port accumulates into EXTRA_PORTS" {
@@ -113,4 +114,29 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
   printf 'log_file = /var/log/audit/audit.log\n' > "$conf"
   run bash -c "source '$SCRIPT'; pin_auditd_key '$conf' space_left_action syslog; pin_auditd_key '$conf' space_left_action syslog; grep -c '^space_left_action = syslog$' '$conf'"
   [ "$output" = "1" ]
+}
+
+# ---- interactive_homes (step 29: pure /etc/passwd read, probed in isolation)
+
+@test "interactive_homes picks uid>=1000 with a shell, plus root, skipping the rest" {
+  # A fake passwd fed through a stubbed awk input: root (out of the uid
+  # range but always interactive), a normal user, a service account with
+  # nologin, a uid<1000 with a shell, and a user whose home doesn't exist.
+  fake="$BATS_TEST_TMPDIR/passwd"
+  mkdir -p "$BATS_TEST_TMPDIR/rootdir" "$BATS_TEST_TMPDIR/alice" "$BATS_TEST_TMPDIR/svc"
+  {
+    printf 'root:x:0:0:root:%s:/bin/bash\n' "$BATS_TEST_TMPDIR/rootdir"
+    printf 'alice:x:1000:1000::%s:/bin/bash\n' "$BATS_TEST_TMPDIR/alice"
+    printf 'svc:x:998:998::%s:/usr/sbin/nologin\n' "$BATS_TEST_TMPDIR/svc"
+    printf 'daemonish:x:120:120::%s:/bin/bash\n' "$BATS_TEST_TMPDIR/svc"
+    printf 'ghost:x:1001:1001::%s/nope:/bin/bash\n' "$BATS_TEST_TMPDIR"
+  } > "$fake"
+  run bash -c "source '$SCRIPT'; interactive_homes() { awk -F: '(\$3 >= 1000 && \$7 !~ /(nologin|false)\$/) || \$1 == \"root\" { print \$1 \":\" \$6 }' '$fake' | while IFS=: read -r u h; do if [ -n \"\$h\" ] && [ -d \"\$h\" ]; then printf '%s\n' \"\$u\"; fi; done; }; interactive_homes"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"root"* ]]
+  [[ "$output" == *"alice"* ]]
+  # nologin service account, sub-1000 uid and the missing home are all out.
+  [[ "$output" != *"svc"* ]]
+  [[ "$output" != *"daemonish"* ]]
+  [[ "$output" != *"ghost"* ]]
 }

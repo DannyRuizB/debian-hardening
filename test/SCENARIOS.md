@@ -38,8 +38,9 @@ cd test
 | 18 | `--no-su-restriction` | no `sugroup` group and `pam_wheel` stays inactive in `pam.d/su`, the rest still applies |
 | 19 | `--no-log-permissions` | a planted world-readable log keeps its world-read bit (the file-permissions sweep only strips `o+w`) and no rsyslog drop-in is written, the rest still applies |
 | 20 | `--no-logrotate-perms` | stock Debian is its own offender: the bare global `create` and dpkg's `create 644 root root` must stay exactly as the distro shipped them, the rest still applies |
+| 21 | `--no-home-permissions` | a planted 755 home and its `.netrc` credential relic both survive untouched (no other step looks at homes), the rest still applies |
 
-**Result: 39/39 checks pass.**
+**Result: 42/42 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

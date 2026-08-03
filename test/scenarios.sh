@@ -284,6 +284,28 @@ got=$(val s20 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s20 >/dev/null 2>&1
 
+echo "-- 21. Skip a step: --no-home-permissions -------------------"
+fresh_node s21 >/dev/null
+# Plant a loose interactive home with a credential relic; with the step
+# skipped both must survive untouched (no other step looks at homes — the
+# file-permissions sweep only strips o+w, and 755 has no o+w to strip).
+docker exec s21 bash -c "useradd --create-home --shell /bin/bash dhhome &&
+  chmod 755 /home/dhhome &&
+  printf 'machine example.com login dh password hunter2\n' > /home/dhhome/.netrc &&
+  chown dhhome:dhhome /home/dhhome/.netrc"
+docker exec s21 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-home-permissions -y >/dev/null 2>&1
+got=$(docker exec s21 stat -c %a /home/dhhome 2>/dev/null)
+[ "$got" = 755 ] && P "--no-home-permissions -> planted home keeps its 755" \
+                 || F "--no-home-permissions should leave the 755 home alone" "$got"
+if docker exec s21 test -e /home/dhhome/.netrc 2>/dev/null; then
+  P "--no-home-permissions -> the .netrc relic survives"; else
+  F "--no-home-permissions should not remove .netrc" "file gone"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s21 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s21 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
