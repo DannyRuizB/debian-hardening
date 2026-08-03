@@ -306,6 +306,28 @@ got=$(val s21 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s21 >/dev/null 2>&1
 
+echo "-- 22. Skip a step: --no-process-isolation ------------------"
+fresh_node s22 >/dev/null
+# Plant the offending state: /proc without hidepid and ptrace_scope at 0.
+# With the step skipped both must stay exactly as planted — no other step
+# touches /proc or yama (the step-6 sysctl drop-in doesn't carry ptrace).
+docker exec s22 bash -c "mount -o remount,hidepid=0 /proc; sysctl -qw kernel.yama.ptrace_scope=0" >/dev/null 2>&1
+docker exec s22 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-process-isolation -y >/dev/null 2>&1
+if docker exec s22 findmnt -no OPTIONS /proc | grep -q hidepid=; then
+  F "--no-process-isolation should leave /proc without hidepid" "$(docker exec s22 findmnt -no OPTIONS /proc)"; else
+  P "--no-process-isolation -> /proc keeps showing every process"; fi
+got=$(docker exec s22 sysctl -n kernel.yama.ptrace_scope 2>/dev/null)
+[ "$got" = 0 ] && P "--no-process-isolation -> ptrace_scope stays at the planted 0" \
+              || F "--no-process-isolation should leave ptrace_scope alone" "$got"
+if docker exec s22 test -f /etc/sysctl.d/99-hardening-process.conf 2>/dev/null; then
+  F "--no-process-isolation should not write the ptrace drop-in" "file exists"; else
+  P "--no-process-isolation -> no ptrace drop-in"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s22 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s22 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
