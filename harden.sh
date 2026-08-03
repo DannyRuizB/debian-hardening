@@ -106,6 +106,13 @@
 #      .rhosts, .forward — are removed. A 755 home is the default on many
 #      distros and it hands every local account a reading pass over
 #      ~/.ssh, ~/.aws and shell history.
+#  30. Process isolation: your neighbour's process is private. /proc is
+#      remounted (and pinned in fstab) with hidepid, so an unprivileged user
+#      no longer sees other users' processes — no more reading passwords and
+#      tokens straight off someone else's command line with `ps aux`. And
+#      kernel.yama.ptrace_scope=1 stops one process from attaching to
+#      another of the SAME user: without it, anything you run can read the
+#      memory of your browser, ssh-agent or gpg-agent.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -145,6 +152,7 @@
 #   --no-logrotate-perms   skip logrotate hardening (rotated logs re-created 0640)
 #   --no-auditd            skip the audit daemon (staged ruleset + enabled at boot)
 #   --no-home-permissions  skip home directory permissions (750 + legacy dotfiles)
+#   --no-process-isolation skip process isolation (/proc hidepid + ptrace_scope)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -186,6 +194,7 @@ DO_LOG_PERMISSIONS=1
 DO_LOGROTATE_PERMS=1
 DO_AUDITD=1
 DO_HOME_PERMISSIONS=1
+DO_PROCESS_ISOLATION=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -257,6 +266,7 @@ parse_args() {
             --no-logrotate-perms) DO_LOGROTATE_PERMS=0; shift;;
             --no-auditd) DO_AUDITD=0; shift;;
             --no-home-permissions) DO_HOME_PERMISSIONS=0; shift;;
+            --no-process-isolation) DO_PROCESS_ISOLATION=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -1973,6 +1983,130 @@ EOF
     ok "Home directories are private to their owner"
 }
 
+# ---- Step 30: process isolation (/proc hidepid + ptrace_scope) -------------
+
+# hidepid=2 ("invisible" in modern kernels) hides other users' /proc entries
+# outright; hidepid=1 would still show the directories. 2 is the useful one:
+# with 1, `ps` still enumerates every PID and its owner.
+PROCESS_HIDEPID="${PROCESS_HIDEPID:-2}"
+# An optional group that keeps full visibility — for a monitoring agent that
+# must see the whole process table without running as root. Empty by default:
+# no exception until someone asks for one.
+PROCESS_HIDEPID_GID="${PROCESS_HIDEPID_GID:-}"
+PROCESS_SYSCTL_DROPIN="/etc/sysctl.d/99-hardening-process.conf"
+
+setup_process_isolation() {
+    [ "$DO_PROCESS_ISOLATION" -eq 1 ] || { log "Skipping process isolation"; return 0; }
+    log "Isolating processes from each other (/proc hidepid + ptrace_scope)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would pin /proc with hidepid=%s in /etc/fstab, remount it live, and set kernel.yama.ptrace_scope=1\n' \
+            "$c_yellow" "$c_reset" "$PROCESS_HIDEPID"
+        return 0
+    fi
+
+    # ---- Door 1: /proc hidepid --------------------------------------------
+    # `ps aux` on a stock box is an information goldmine for any local
+    # account: every command line in full, so a `mysql -pSecret`, a curl with
+    # a token in the URL or a backup script's `--password=` is there for the
+    # taking — plus a free inventory of what runs and as whom. hidepid makes
+    # /proc show a user only their own processes; root and the optional
+    # monitoring group still see everything.
+    local mountopts="hidepid=$PROCESS_HIDEPID"
+    [ -n "$PROCESS_HIDEPID_GID" ] && mountopts="$mountopts,gid=$PROCESS_HIDEPID_GID"
+
+    # fstab: Debian has NO /proc line (the initramfs and systemd mount it),
+    # so without a pin the hardening dies at the next reboot. An existing
+    # entry keeps its own options; only what's missing is added.
+    if grep -qE '^[^#[:space:]]+[[:space:]]+/proc[[:space:]]' /etc/fstab; then
+        local tmp
+        tmp=$(mktemp)
+        awk -v want="$mountopts" '
+            $1 !~ /^#/ && $2 == "/proc" {
+                n = split($4, have, ",")
+                for (i = 1; i <= n; i++) seen[have[i]] = 1
+                m = split(want, wants, ",")
+                for (i = 1; i <= m; i++) {
+                    # A key=value option counts as present if the KEY is
+                    # already there — an admin who chose hidepid=1 or their
+                    # own gid keeps that choice instead of getting a second,
+                    # contradictory copy of the same key.
+                    split(wants[i], kv, "=")
+                    found = 0
+                    for (o in seen) { split(o, ok2, "="); if (ok2[1] == kv[1]) found = 1 }
+                    if (!found) $4 = $4 "," wants[i]
+                }
+                delete seen
+                if ($5 == "") $5 = "0"
+                if ($6 == "") $6 = "0"
+                print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6
+                next
+            }
+            { print }
+        ' /etc/fstab > "$tmp"
+        if cmp -s "$tmp" /etc/fstab; then
+            ok "fstab entry for /proc already carries a hidepid option"
+            rm -f "$tmp"
+        else
+            install -m 644 -o root -g root "$tmp" /etc/fstab
+            rm -f "$tmp"
+            ok "Added the hidepid option to the existing /proc fstab entry"
+        fi
+    else
+        printf 'proc\t/proc\tproc\tdefaults,nosuid,nodev,noexec,%s\t0\t0\n' "$mountopts" >> /etc/fstab
+        ok "Pinned /proc in /etc/fstab with $mountopts"
+    fi
+
+    # Live remount, only when the option isn't already in effect (a second
+    # pass must not touch the mount table). Modern kernels report hidepid=2
+    # as "invisible" and hidepid=1 as "noaccess", so accept either spelling.
+    local live want_live=0
+    live=$(findmnt -no OPTIONS /proc 2>/dev/null || true)
+    case "$PROCESS_HIDEPID" in
+        2) case ",$live," in *",hidepid=2,"*|*",hidepid=invisible,"*) ;; *) want_live=1;; esac;;
+        1) case ",$live," in *",hidepid=1,"*|*",hidepid=noaccess,"*) ;; *) want_live=1;; esac;;
+        *) case ",$live," in *",hidepid=$PROCESS_HIDEPID,"*) ;; *) want_live=1;; esac;;
+    esac
+    if [ "$want_live" -eq 1 ]; then
+        if mount -o "remount,$mountopts" /proc 2>/dev/null; then
+            ok "Remounted /proc with $mountopts — users no longer see each other's processes"
+        else
+            warn "could not remount /proc with $mountopts (restricted environment) — the fstab pin applies at next boot"
+        fi
+    else
+        ok "/proc is already mounted with hidepid"
+    fi
+
+    # ---- Door 2: ptrace_scope --------------------------------------------
+    # hidepid hides the process LIST; ptrace_scope stops reading a process's
+    # MEMORY. With the default 0, any process can attach to another of the
+    # same user: one compromised script reads the session cookies out of the
+    # browser, the keys out of ssh-agent, the passphrase out of gpg-agent —
+    # no root needed. With 1 only a direct parent may attach, which is all
+    # debuggers launched from the shell actually need.
+    # Own drop-in (not the step-6 sysctl file) so --no-process-isolation and
+    # --no-sysctl stay independent, like the per-step sshd drop-ins.
+    local desired
+    desired=$(printf '# Managed by harden.sh (process isolation step). Edit the script, not this file.\n# Only a direct parent may ptrace a process: without this, anything running\n# as you can read the memory of your browser, ssh-agent or gpg-agent.\nkernel.yama.ptrace_scope = 1\n')
+    if [ -f "$PROCESS_SYSCTL_DROPIN" ] && [ "$(cat "$PROCESS_SYSCTL_DROPIN")" = "$desired" ]; then
+        ok "ptrace_scope drop-in already in place"
+    else
+        printf '%s' "$desired" > "$PROCESS_SYSCTL_DROPIN"
+        chmod 644 "$PROCESS_SYSCTL_DROPIN"
+        chown root:root "$PROCESS_SYSCTL_DROPIN"
+        ok "Wrote $PROCESS_SYSCTL_DROPIN (kernel.yama.ptrace_scope = 1)"
+    fi
+    # Apply now; the drop-in covers the next boot. Yama may be absent from a
+    # kernel built without it, so a failure warns instead of aborting.
+    if [ "$(sysctl -n kernel.yama.ptrace_scope 2>/dev/null || echo missing)" = "1" ]; then
+        ok "kernel.yama.ptrace_scope is already 1"
+    elif sysctl -q -w kernel.yama.ptrace_scope=1 2>/dev/null; then
+        ok "Set kernel.yama.ptrace_scope=1 live"
+    else
+        warn "kernel.yama.ptrace_scope not settable here (no Yama LSM?) — the drop-in applies where it exists"
+    fi
+    ok "Processes are isolated: no peeking at other users' process lists or memory"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -2008,6 +2142,7 @@ main() {
     [ "$DO_LOGROTATE_PERMS" -eq 1 ] && echo "    - logrotate permissions (rotated logs re-created 0640)"
     [ "$DO_AUDITD" -eq 1 ]           && echo "    - auditd: staged audit ruleset, enabled at boot"
     [ "$DO_HOME_PERMISSIONS" -eq 1 ] && echo "    - home directory permissions (750 + legacy credential dotfiles removed)"
+    [ "$DO_PROCESS_ISOLATION" -eq 1 ] && echo "    - process isolation (/proc hidepid + kernel.yama.ptrace_scope=1)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2046,6 +2181,7 @@ main() {
     setup_logrotate_perms
     setup_auditd
     setup_home_permissions
+    setup_process_isolation
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

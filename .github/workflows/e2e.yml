@@ -80,6 +80,18 @@ jobs:
             printf 'dh@elsewhere.example\n' > /home/dhhome/.forward &&
             chown dhhome:dhhome /home/dhhome/.netrc /home/dhhome/.forward"
 
+      # Step 30 offender: /proc mounted WITHOUT hidepid (the stock state) and
+      # ptrace_scope forced back to 0. The second half matters — this WSL /
+      # runner kernel already ships ptrace_scope=1, so without planting the 0
+      # the check would pass without the step doing anything (tautological).
+      - name: Plant open process visibility for step 30 to close
+        run: |
+          docker exec db-harden-node bash -c "
+            mount -o remount,hidepid=0 /proc &&
+            sysctl -qw kernel.yama.ptrace_scope=0 &&
+            findmnt -no OPTIONS /proc &&
+            sysctl -n kernel.yama.ptrace_scope"
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \
@@ -88,7 +100,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf"
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \
