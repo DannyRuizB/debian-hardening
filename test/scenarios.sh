@@ -354,6 +354,30 @@ got=$(val s23 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s23 >/dev/null 2>&1
 
+echo "-- 24. Skip a step: --no-root-path --------------------------"
+fresh_node s24 >/dev/null
+# Plant the trap in all three PATH sources plus an empty entry. With the step
+# skipped every one of them must survive exactly as planted — no other step
+# looks at PATH (the file-permissions sweep only clears o+w on FILES).
+docker exec s24 bash -c "install -d -m 777 /opt/dh-path-loose &&
+  sed -i 's|^ENV_SUPATH.*|ENV_SUPATH\tPATH=/opt/dh-path-loose:/usr/local/sbin::/usr/local/bin:/usr/sbin:/usr/bin|' /etc/login.defs &&
+  sed -i '5s|PATH=\"[^\"]*\"|PATH=\"/opt/dh-path-loose:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin\"|' /etc/profile"
+docker exec s24 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-root-path -y >/dev/null 2>&1
+if docker exec s24 grep -q "::" /etc/login.defs 2>/dev/null; then
+  P "--no-root-path -> the planted empty entry survives in ENV_SUPATH"; else
+  F "--no-root-path should leave ENV_SUPATH alone" "empty entry gone"; fi
+if docker exec s24 grep -q dh-path-loose /etc/profile 2>/dev/null; then
+  P "--no-root-path -> the planted entry survives in /etc/profile"; else
+  F "--no-root-path should leave /etc/profile alone" "trap gone"; fi
+got=$(docker exec s24 stat -Lc %a /opt/dh-path-loose 2>/dev/null)
+[ "$got" = 777 ] && P "--no-root-path -> the world-writable trap dir keeps its mode" \
+                 || F "--no-root-path should not tighten the trap dir" "$got"
+# ...but the rest of the baseline still applied:
+got=$(val s24 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s24 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
