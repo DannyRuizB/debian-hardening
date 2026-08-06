@@ -40,8 +40,9 @@ cd test
 | 20 | `--no-logrotate-perms` | stock Debian is its own offender: the bare global `create` and dpkg's `create 644 root root` must stay exactly as the distro shipped them, the rest still applies |
 | 21 | `--no-home-permissions` | a planted 755 home and its `.netrc` credential relic both survive untouched (no other step looks at homes), the rest still applies |
 | 22 | `--no-process-isolation` | a planted open `/proc` (no hidepid) and `ptrace_scope=0` both survive, and no ptrace drop-in is written, the rest still applies |
+| 23 | `--no-guess-cost` | planted weak values (`YESCRYPT_COST_FACTOR 5`, `FAIL_DELAY 0`) survive untouched and `pam_faildelay` stays out of `common-auth` — while the password-policy step still pins `ENCRYPT_METHOD`, proving the two login.defs steps are independent |
 
-**Result: 46/46 checks pass.**
+**Result: 51/51 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
