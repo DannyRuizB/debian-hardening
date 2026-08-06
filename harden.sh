@@ -113,6 +113,14 @@
 #      kernel.yama.ptrace_scope=1 stops one process from attaching to
 #      another of the SAME user: without it, anything you run can read the
 #      memory of your browser, ssh-agent or gpg-agent.
+#  31. Guess cost: every wrong password guess gets expensive, offline and
+#      online. yescrypt's cost factor is raised to its maximum in
+#      login.defs, so each attempt against a stolen shadow file costs ~1 s
+#      of CPU instead of milliseconds — a cracking rig drops from millions
+#      of guesses a second to a handful. And pam_faildelay makes every
+#      failed LIVE login wait FAIL_DELAY seconds before the next prompt,
+#      capping online guessing at ~12 attempts a minute. A correct
+#      password pays neither price.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -153,6 +161,7 @@
 #   --no-auditd            skip the audit daemon (staged ruleset + enabled at boot)
 #   --no-home-permissions  skip home directory permissions (750 + legacy dotfiles)
 #   --no-process-isolation skip process isolation (/proc hidepid + ptrace_scope)
+#   --no-guess-cost        skip the guess-cost step (yescrypt cost factor + fail delay)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -195,6 +204,7 @@ DO_LOGROTATE_PERMS=1
 DO_AUDITD=1
 DO_HOME_PERMISSIONS=1
 DO_PROCESS_ISOLATION=1
+DO_GUESS_COST=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -267,6 +277,7 @@ parse_args() {
             --no-auditd) DO_AUDITD=0; shift;;
             --no-home-permissions) DO_HOME_PERMISSIONS=0; shift;;
             --no-process-isolation) DO_PROCESS_ISOLATION=0; shift;;
+            --no-guess-cost) DO_GUESS_COST=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2107,6 +2118,66 @@ setup_process_isolation() {
     ok "Processes are isolated: no peeking at other users' process lists or memory"
 }
 
+setup_guess_cost() {
+    [ "$DO_GUESS_COST" -eq 1 ] || { log "Skipping guess cost"; return 0; }
+    log "Raising the cost of a wrong password guess (offline and online)"
+    # The password steps so far decide WHAT a password may be (15), WHEN it
+    # must change (7) and how many live misses lock the account (19). This
+    # one prices the guesses themselves. Offline: yescrypt's cost factor at
+    # its maximum makes each attempt against a stolen shadow file cost about
+    # a second of CPU instead of milliseconds — the difference between a
+    # cracking rig testing millions of candidates and testing a handful.
+    # Online: pam_faildelay makes every failed live authentication wait
+    # FAIL_DELAY seconds before control returns, so even a guesser that
+    # dodges fail2ban (console, su, serial) gets ~12 tries a minute. A
+    # correct password pays neither price — libpam only applies the delay
+    # when the authentication ultimately fails.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would pin YESCRYPT_COST_FACTOR 11 and FAIL_DELAY 5 in /etc/login.defs\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would enable a pam-auth-update profile wiring pam_faildelay into common-auth\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # Both knobs live in login.defs — chpasswd, newusers AND pam_unix read
+    # the cost factor from there (verified empirically: a PAM password
+    # change also lands a $y$jFT$ hash), and pam_faildelay without inline
+    # arguments falls back to FAIL_DELAY. One file, one source of truth.
+    local key val
+    for kv in "YESCRYPT_COST_FACTOR 11" "FAIL_DELAY 5"; do
+        key="${kv% *}"; val="${kv#* }"
+        if grep -qE "^${key}[[:space:]]" /etc/login.defs; then
+            sed -i "s/^${key}[[:space:]].*/${key}\t${val}/" /etc/login.defs
+        else
+            printf '%s\t%s\n' "$key" "$val" >> /etc/login.defs
+        fi
+    done
+    # Existing hashes keep the cost they were minted with — only the next
+    # password change re-hashes. The admin user this script installs is
+    # key-only (locked password), so nothing needs re-hashing here.
+    #
+    # The delay module must sit on the FAILURE path: after pam_unix (so the
+    # guess has actually been judged) but before anything that ends the
+    # stack — faillock's authfail dies, and Debian's closing pam_deny is
+    # requisite. A line appended after those never runs. Priority 128 puts
+    # it exactly there: below pam_unix (256), above authfail (0).
+    install -d -m 755 /usr/share/pam-configs
+    cat > /usr/share/pam-configs/hardening-faildelay <<'EOF'
+Name: Fail delay — every wrong guess waits (debian-hardening)
+Default: yes
+Priority: 128
+Auth-Type: Primary
+Auth:
+	optional			pam_faildelay.so
+EOF
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive pam-auth-update --package \
+            --enable hardening-faildelay \
+            || warn "pam-auth-update could not enable the faildelay profile"
+        ok "wrong guesses now cost ~1 s of CPU offline and a $(grep -E '^FAIL_DELAY' /etc/login.defs | awk '{print $2}')-second wait live"
+    else
+        warn "pam-auth-update not found — faildelay profile written but not wired"
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -2143,6 +2214,7 @@ main() {
     [ "$DO_AUDITD" -eq 1 ]           && echo "    - auditd: staged audit ruleset, enabled at boot"
     [ "$DO_HOME_PERMISSIONS" -eq 1 ] && echo "    - home directory permissions (750 + legacy credential dotfiles removed)"
     [ "$DO_PROCESS_ISOLATION" -eq 1 ] && echo "    - process isolation (/proc hidepid + kernel.yama.ptrace_scope=1)"
+    [ "$DO_GUESS_COST" -eq 1 ]  && echo "    - guess cost (yescrypt cost factor 11 + 5 s fail delay)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2182,6 +2254,7 @@ main() {
     setup_auditd
     setup_home_permissions
     setup_process_isolation
+    setup_guess_cost
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

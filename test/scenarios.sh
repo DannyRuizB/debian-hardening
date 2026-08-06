@@ -328,6 +328,32 @@ got=$(val s22 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s22 >/dev/null 2>&1
 
+echo "-- 23. Skip a step: --no-guess-cost -------------------------"
+fresh_node s23 >/dev/null
+# Plant the WEAK values explicitly (the stock file carries neither key).
+# With the step skipped both must stay exactly as planted — and the
+# password-policy step must still pin ENCRYPT_METHOD, proving the two
+# login.defs steps are independent.
+docker exec s23 bash -c "printf 'YESCRYPT_COST_FACTOR\t5\nFAIL_DELAY\t0\n' >> /etc/login.defs"
+docker exec s23 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-guess-cost -y >/dev/null 2>&1
+got=$(docker exec s23 awk '$1=="YESCRYPT_COST_FACTOR"{print $2}' /etc/login.defs 2>/dev/null)
+[ "$got" = 5 ] && P "--no-guess-cost -> the planted cost factor 5 survives" \
+              || F "--no-guess-cost should leave YESCRYPT_COST_FACTOR alone" "$got"
+got=$(docker exec s23 awk '$1=="FAIL_DELAY"{print $2}' /etc/login.defs 2>/dev/null)
+[ "$got" = 0 ] && P "--no-guess-cost -> the planted FAIL_DELAY 0 survives" \
+              || F "--no-guess-cost should leave FAIL_DELAY alone" "$got"
+if docker exec s23 grep -q pam_faildelay /etc/pam.d/common-auth 2>/dev/null; then
+  F "--no-guess-cost should not wire pam_faildelay" "$(docker exec s23 grep pam_faildelay /etc/pam.d/common-auth)"; else
+  P "--no-guess-cost -> pam_faildelay stays out of common-auth"; fi
+got=$(docker exec s23 awk '$1=="ENCRYPT_METHOD"{print $2}' /etc/login.defs 2>/dev/null)
+[ "$got" = YESCRYPT ] && P "the password-policy step still pinned ENCRYPT_METHOD (independent)" \
+                      || F "password policy should still pin ENCRYPT_METHOD" "$got"
+# ...but the rest of the baseline still applied:
+got=$(val s23 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s23 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
