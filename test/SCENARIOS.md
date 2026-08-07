@@ -42,9 +42,9 @@ cd test
 | 22 | `--no-process-isolation` | a planted open `/proc` (no hidepid) and `ptrace_scope=0` both survive, and no ptrace drop-in is written, the rest still applies |
 | 23 | `--no-guess-cost` | planted weak values (`YESCRYPT_COST_FACTOR 5`, `FAIL_DELAY 0`) survive untouched and `pam_faildelay` stays out of `common-auth` — while the password-policy step still pins `ENCRYPT_METHOD`, proving the two login.defs steps are independent |
 | 24 | `--no-root-path` | planted PATH offenders (a world-writable directory, an empty entry) survive untouched in `login.defs` and `/etc/profile`, and the loose directory keeps its mode — no other step looks at PATH, the rest still applies |
-| 24 | `--no-root-path` | planted PATH offenders (a world-writable directory, an empty entry) survive untouched in `login.defs` and `/etc/profile`, and the loose directory keeps its mode — no other step looks at PATH, the rest still applies |
+| 25 | `--no-apt-sandboxing` | no sandbox drop-in is written and the `apt-daily-upgrade` unit keeps its stock (unconfined) `NoNewPrivileges=no` — the rest still applies |
 
-**Result: 55/55 checks pass.**
+**Result: 58/58 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
