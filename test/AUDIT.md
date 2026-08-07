@@ -96,7 +96,7 @@ actually promises (the home-directory sweep and the process-isolation
 doors are the two most recent). Current score on a freshly hardened node:
 
 ```
- Score: 113 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 116 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty

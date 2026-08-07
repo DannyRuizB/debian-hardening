@@ -382,6 +382,21 @@ got=$(val s24 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s24 >/dev/null 2>&1
 
+echo "-- 25. Skip a step: --no-apt-sandboxing ---------------------"
+fresh_node s25
+docker exec s25 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-apt-sandboxing -y >/dev/null 2>&1
+if docker exec s25 test -f /etc/systemd/system/apt-daily-upgrade.service.d/99-hardening.conf 2>/dev/null; then
+  F "--no-apt-sandboxing should not write the apt sandbox drop-in" "file exists"; else
+  P "--no-apt-sandboxing -> no apt sandbox drop-in"; fi
+got=$(docker exec s25 systemctl show apt-daily-upgrade.service -p NoNewPrivileges --value 2>/dev/null)
+[ "$got" = no ] && P "--no-apt-sandboxing -> apt updater keeps its stock (unconfined) unit" \
+                || F "--no-apt-sandboxing should leave the apt unit unconfined" "$got"
+# ...but the rest of the baseline still applied:
+got=$(val s25 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s25 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

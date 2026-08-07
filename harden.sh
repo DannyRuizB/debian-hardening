@@ -128,6 +128,11 @@
 #      writable directories are dropped from ENV_SUPATH / ENV_PATH, and the
 #      surviving directories lose any group/other write bit. The admin's own
 #      additions are kept: only unsafe entries go.
+#  33. Apt updater sandboxing (systemd): a hardening drop-in for the
+#      apt-daily-upgrade unit — NoNewPrivileges, PrivateTmp, ProtectHome,
+#      ProtectControlGroups. Deliberately WITHOUT ProtectSystem or
+#      RestrictSUIDSGID: both were measured to break apt (dpkg writes /usr and
+#      installs setuid binaries). If systemd rejects the drop-in, it's reverted.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -170,6 +175,7 @@
 #   --no-process-isolation skip process isolation (/proc hidepid + ptrace_scope)
 #   --no-guess-cost        skip the guess-cost step (yescrypt cost factor + fail delay)
 #   --no-root-path         skip root PATH integrity (unsafe PATH entries + dir modes)
+#   --no-apt-sandboxing    skip the systemd sandboxing drop-in for the apt updater
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -214,6 +220,7 @@ DO_HOME_PERMISSIONS=1
 DO_PROCESS_ISOLATION=1
 DO_GUESS_COST=1
 DO_ROOT_PATH=1
+DO_APT_SANDBOXING=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -288,6 +295,7 @@ parse_args() {
             --no-process-isolation) DO_PROCESS_ISOLATION=0; shift;;
             --no-guess-cost) DO_GUESS_COST=0; shift;;
             --no-root-path) DO_ROOT_PATH=0; shift;;
+            --no-apt-sandboxing) DO_APT_SANDBOXING=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2364,6 +2372,80 @@ setup_root_path() {
     ok "root's PATH cannot be hijacked by a writable directory or an implicit '.'"
 }
 
+APT_SANDBOX_UNIT="apt-daily-upgrade.service"
+APT_SANDBOX_DROPIN_DIR="/etc/systemd/system/apt-daily-upgrade.service.d"
+APT_SANDBOX_DROPIN="$APT_SANDBOX_DROPIN_DIR/99-hardening.conf"
+
+setup_apt_sandboxing() {
+    [ "$DO_APT_SANDBOXING" -eq 1 ] || { log "Skipping apt updater sandboxing"; return 0; }
+    log "Sandboxing the $APT_SANDBOX_UNIT unit (systemd)"
+    # The unattended-upgrades path runs unattended, on a timer, as root, and
+    # reaches out to the network to pull and install packages — a foothold
+    # worth boxing in, exactly like fail2ban (step 22). But apt is the
+    # ANTI-sandbox workload, and the interesting part is what it will NOT
+    # tolerate. Two flags that read like obvious hardening actively break it,
+    # BOTH MEASURED on the node before this step was written:
+    #   * ProtectSystem=full/strict — dpkg writes /usr, /boot, /etc, /var on
+    #     every install; a read-only system tree fails the upgrade outright.
+    #     (fail2ban tolerated ProtectSystem=full with a ReadWritePaths carve-out
+    #     — apt tolerates none at all.)
+    #   * RestrictSUIDSGID=true — dpkg installs setuid binaries (passwd, sudo,
+    #     mount, ...). Measured: reinstalling `passwd` under this flag fails
+    #     with dpkg error status 100. A single security update that touches a
+    #     setuid package would break the unattended run at 6am.
+    # So the shipped set is the process-level confinement that CANNOT collide
+    # with installing packages: no new privileges, a private /tmp, /home hidden,
+    # cgroup fs protected. Measured: apt-daily-upgrade runs to Result=success
+    # under exactly this set, including a reinstall of a setuid package.
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "systemd not available — apt sandboxing skipped"
+        return 0
+    fi
+    if ! systemctl list-unit-files "$APT_SANDBOX_UNIT" >/dev/null 2>&1 \
+        || ! systemctl cat "$APT_SANDBOX_UNIT" >/dev/null 2>&1; then
+        warn "$APT_SANDBOX_UNIT not present (unattended-upgrades not installed?) — nothing to sandbox"
+        return 0
+    fi
+    local content
+    content=$(cat <<'EOF'
+# Managed by debian-hardening (apt updater sandboxing step).
+# Conservative systemd confinement for the unattended apt updater. ONLY the
+# process-level flags that cannot collide with installing packages: NO
+# ProtectSystem (dpkg writes /usr, /boot, /etc) and NO RestrictSUIDSGID (dpkg
+# installs setuid binaries) — both measured to break apt. Edit flags, not this.
+[Service]
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectControlGroups=true
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s and reload systemd\n' "$c_yellow" "$c_reset" "$APT_SANDBOX_DROPIN"
+        return 0
+    fi
+    if [ -f "$APT_SANDBOX_DROPIN" ] && [ "$(cat "$APT_SANDBOX_DROPIN")" = "$content" ]; then
+        ok "$APT_SANDBOX_UNIT sandboxing already in place"
+        return 0
+    fi
+    install -d -m 755 "$APT_SANDBOX_DROPIN_DIR"
+    printf '%s\n' "$content" > "$APT_SANDBOX_DROPIN"
+    chmod 644 "$APT_SANDBOX_DROPIN"
+    systemctl daemon-reload
+    # A oneshot updater can't be "restarted and checked active" like fail2ban.
+    # The safety net instead: confirm systemd actually APPLIED the drop-in — a
+    # malformed one is rejected by daemon-reload and the property won't reflect.
+    # If it didn't take, revert rather than ship a confinement that isn't real.
+    if [ "$(systemctl show "$APT_SANDBOX_UNIT" -p NoNewPrivileges --value 2>/dev/null)" = "yes" ]; then
+        ok "$APT_SANDBOX_UNIT is sandboxed (NoNewPrivileges, PrivateTmp, ProtectHome, ProtectControlGroups)"
+    else
+        rm -f "$APT_SANDBOX_DROPIN"
+        systemctl daemon-reload
+        err "$APT_SANDBOX_UNIT did not accept the sandbox drop-in — reverted"
+        return 1
+    fi
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -2402,6 +2484,7 @@ main() {
     [ "$DO_PROCESS_ISOLATION" -eq 1 ] && echo "    - process isolation (/proc hidepid + kernel.yama.ptrace_scope=1)"
     [ "$DO_GUESS_COST" -eq 1 ]  && echo "    - guess cost (yescrypt cost factor 11 + 5 s fail delay)"
     [ "$DO_ROOT_PATH" -eq 1 ]   && echo "    - root PATH integrity (drop unsafe entries, tighten directory modes)"
+    [ "$DO_APT_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the apt updater (unattended-upgrades)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2443,6 +2526,7 @@ main() {
     setup_process_isolation
     setup_guess_cost
     setup_root_path
+    setup_apt_sandboxing
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
