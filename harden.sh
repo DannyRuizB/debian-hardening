@@ -121,6 +121,13 @@
 #      failed LIVE login wait FAIL_DELAY seconds before the next prompt,
 #      capping online guessing at ~12 attempts a minute. A correct
 #      password pays neither price.
+#  32. Root PATH integrity (CIS 6.2.8): every command root types is looked
+#      up along PATH in order, so whoever can write to a directory early in
+#      that list chooses what root actually runs. Empty entries (`::` — they
+#      mean "the current directory"), relative entries and group/world-
+#      writable directories are dropped from ENV_SUPATH / ENV_PATH, and the
+#      surviving directories lose any group/other write bit. The admin's own
+#      additions are kept: only unsafe entries go.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -162,6 +169,7 @@
 #   --no-home-permissions  skip home directory permissions (750 + legacy dotfiles)
 #   --no-process-isolation skip process isolation (/proc hidepid + ptrace_scope)
 #   --no-guess-cost        skip the guess-cost step (yescrypt cost factor + fail delay)
+#   --no-root-path         skip root PATH integrity (unsafe PATH entries + dir modes)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -205,6 +213,7 @@ DO_AUDITD=1
 DO_HOME_PERMISSIONS=1
 DO_PROCESS_ISOLATION=1
 DO_GUESS_COST=1
+DO_ROOT_PATH=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -278,6 +287,7 @@ parse_args() {
             --no-home-permissions) DO_HOME_PERMISSIONS=0; shift;;
             --no-process-isolation) DO_PROCESS_ISOLATION=0; shift;;
             --no-guess-cost) DO_GUESS_COST=0; shift;;
+            --no-root-path) DO_ROOT_PATH=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2178,6 +2188,182 @@ EOF
     fi
 }
 
+# Judges one PATH entry, printing why it is unsafe (empty output = it is fine).
+# The check that matters is the LAST one, and it has a trap: on any modern
+# Debian /bin and /sbin are SYMLINKS into /usr (usrmerge), and a symlink is
+# always mode 777 — so the obvious `stat -c %a` reports every stock system as
+# having world-writable directories in root's PATH. `stat -Lc` follows the
+# link and reports the real directory (755). This function is where that
+# false positive was cornered; verify.sh and audit.sh dereference too.
+path_entry_problem() {
+    local dir="$1"
+    if [ -z "$dir" ]; then
+        printf 'empty entry (means the current directory)'
+        return 0
+    fi
+    case "$dir" in
+        .|..|./*|../*) printf 'relative entry (%s)' "$dir"; return 0;;
+        /*) : ;;
+        *) printf 'relative entry (%s)' "$dir"; return 0;;
+    esac
+    if [ ! -d "$dir" ]; then
+        printf 'not a directory'
+        return 0
+    fi
+    local mode
+    mode=$(stat -Lc %a "$dir" 2>/dev/null) || { printf 'unreadable'; return 0; }
+    # Pad to 4 digits so the group/other test is positional-safe.
+    while [ "${#mode}" -lt 4 ]; do mode="0$mode"; done
+    local go="${mode: -2}"
+    case "$go" in
+        *[2367]) printf 'writable by group or others (mode %s)' "$mode"; return 0;;
+    esac
+    printf ''
+}
+
+# Rewrites a PATH string keeping only the entries that survive the checks
+# above, in their original order. Echoes the cleaned value.
+sanitize_path_value() {
+    local value="$1" out="" entry problem
+    local IFS=':'
+    # shellcheck disable=SC2086
+    set -f
+    for entry in $value; do
+        problem=$(path_entry_problem "$entry")
+        [ -n "$problem" ] && continue
+        if [ -z "$out" ]; then out="$entry"; else out="$out:$entry"; fi
+    done
+    set +f
+    printf '%s' "$out"
+}
+
+# Collects every directory named by the three PATH sources below, one per
+# line, deduplicated. Used by the mode sweep and by the audit.
+root_path_dirs() {
+    {
+        awk '$1=="ENV_SUPATH"{sub(/^[^=]*=/, "", $2); print $2}' /etc/login.defs 2>/dev/null
+        grep -hoE '^[[:space:]]*PATH="[^"]*"' /etc/profile 2>/dev/null | sed 's/.*PATH="//; s/"$//'
+        awk -F= '$1=="PATH"{print $2}' /etc/crontab 2>/dev/null
+    } | tr ':' '\n' | sed '/^$/d' | sort -u
+}
+
+setup_root_path() {
+    [ "$DO_ROOT_PATH" -eq 1 ] || { log "Skipping root PATH integrity"; return 0; }
+    log "Securing root's PATH (CIS 6.2.8)"
+    # Every command root types is looked up along PATH, in order — so whoever
+    # can write to a directory early in that list chooses what root actually
+    # runs. An empty entry (`::`, or a leading/trailing colon) means "the
+    # current directory": root cd's into /tmp, types `ls`, and runs whatever
+    # a local user left there named ls. A group/world-writable directory
+    # anywhere in the list is the same trap, and it survives reboots.
+    #
+    # THREE SOURCES, because pinning only login.defs is a hollow promise on
+    # Debian — verified on the node before writing this step:
+    #   1. /etc/login.defs ENV_SUPATH / ENV_PATH — a real login, or `su -`
+    #      from an unprivileged account.
+    #   2. /etc/profile — which OVERWRITES the value from login.defs for every
+    #      login shell with a literal `PATH="..."` per uid branch. This is the
+    #      PATH an admin actually sees, and it wins.
+    #   3. /etc/crontab PATH= — what root's scheduled jobs get; neither of
+    #      the above reaches them.
+    # Nothing is imposed: each source keeps the entries the admin put there
+    # and loses only the unsafe ones (empty, relative, missing,
+    # group/world-writable) — the merge-by-key stance of the process
+    # isolation step, so a legitimate /opt/tools survives.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would drop unsafe entries (empty, relative, world-writable) from ENV_SUPATH / ENV_PATH in /etc/login.defs, the PATH lines of /etc/profile and PATH= in /etc/crontab\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would remove group/other write permission from the directories those PATHs name\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    local key current cleaned changed_any=0
+
+    # ---- The directories FIRST, then the lists -----------------------------
+    # The order of these two halves is not cosmetic, and getting it wrong is
+    # a bug this step already had: sanitizing the lists first DELETED any
+    # world-writable directory from the PATH instead of fixing it — so a
+    # loose /usr/local/bin vanished from root's PATH (breaking every locally
+    # installed binary) when the right answer was to tighten its mode and
+    # keep it. Fix what can be fixed; only then drop what cannot.
+    #
+    # Only modes are touched (never ownership — adopting a distro directory
+    # would be worse than the problem), and only when actually loose.
+    local dir mode tightened=0 target
+    while IFS= read -r dir; do
+        [ -d "$dir" ] || continue
+        mode=$(stat -Lc %a "$dir" 2>/dev/null) || continue
+        while [ "${#mode}" -lt 4 ]; do mode="0$mode"; done
+        case "${mode: -2}" in
+            *[2367])
+                # Dereference deliberately: chmod on /bin would change the
+                # LINK, which is meaningless — links are always mode 777, and
+                # that is exactly why a naive `stat -c %a` check reports every
+                # stock Debian as broken here.
+                target=$(readlink -f "$dir")
+                chmod go-w "$target"
+                warn "tightened $dir -> $target (was $mode) — it was writable by group or others"
+                tightened=$((tightened + 1))
+                ;;
+        esac
+    done < <(root_path_dirs)
+    [ "$tightened" -eq 0 ] && ok "every directory in root's PATH is root-writable only"
+
+    # ---- Source 1: login.defs ---------------------------------------------
+    for key in ENV_SUPATH ENV_PATH; do
+        current=$(awk -v k="$key" '$1==k{sub(/^[^=]*=/, "", $2); print $2; exit}' /etc/login.defs)
+        [ -n "$current" ] || { warn "$key not set in /etc/login.defs — leaving it alone"; continue; }
+        cleaned=$(sanitize_path_value "$current")
+        if [ -z "$cleaned" ]; then
+            warn "$key would be empty after dropping unsafe entries — refusing to touch it"
+            continue
+        fi
+        if [ "$cleaned" = "$current" ]; then
+            ok "$key is already free of unsafe entries"
+        else
+            sed -i "s|^${key}[[:space:]].*|${key}\tPATH=${cleaned}|" /etc/login.defs
+            warn "$key had unsafe entries — rewritten to PATH=$cleaned"
+            changed_any=1
+        fi
+    done
+
+    # ---- Source 2: /etc/profile (the one that actually wins) --------------
+    # Debian's /etc/profile sets PATH literally, in an if/else on the uid, so
+    # there are normally two lines. Each is sanitized in place; the quoting
+    # and indentation are preserved by rewriting only what is inside "".
+    if [ -f /etc/profile ]; then
+        local line_no raw cleaned_p
+        while IFS= read -r line_no; do
+            raw=$(sed -n "${line_no}p" /etc/profile | sed 's/.*PATH="//; s/"$//')
+            cleaned_p=$(sanitize_path_value "$raw")
+            if [ -z "$cleaned_p" ]; then
+                warn "/etc/profile line $line_no would be left with an empty PATH — skipped"
+                continue
+            fi
+            if [ "$cleaned_p" != "$raw" ]; then
+                sed -i "${line_no}s|PATH=\"[^\"]*\"|PATH=\"${cleaned_p}\"|" /etc/profile
+                warn "/etc/profile line $line_no had unsafe PATH entries — rewritten"
+                changed_any=1
+            fi
+        done < <(grep -nE '^[[:space:]]*PATH="[^"]*"' /etc/profile | cut -d: -f1)
+        [ "$changed_any" -eq 0 ] && ok "/etc/profile PATH lines are already clean"
+    fi
+
+    # ---- Source 3: /etc/crontab ------------------------------------------
+    if [ -f /etc/crontab ]; then
+        local cron_path cleaned_c
+        cron_path=$(awk -F= '$1=="PATH"{print $2; exit}' /etc/crontab)
+        if [ -n "$cron_path" ]; then
+            cleaned_c=$(sanitize_path_value "$cron_path")
+            if [ -n "$cleaned_c" ] && [ "$cleaned_c" != "$cron_path" ]; then
+                sed -i "s|^PATH=.*|PATH=${cleaned_c}|" /etc/crontab
+                warn "/etc/crontab PATH had unsafe entries — rewritten to $cleaned_c"
+                changed_any=1
+            fi
+        fi
+    fi
+
+    ok "root's PATH cannot be hijacked by a writable directory or an implicit '.'"
+}
+
 # ---- Main -----------------------------------------------------------------
 main() {
     require_root
@@ -2215,6 +2401,7 @@ main() {
     [ "$DO_HOME_PERMISSIONS" -eq 1 ] && echo "    - home directory permissions (750 + legacy credential dotfiles removed)"
     [ "$DO_PROCESS_ISOLATION" -eq 1 ] && echo "    - process isolation (/proc hidepid + kernel.yama.ptrace_scope=1)"
     [ "$DO_GUESS_COST" -eq 1 ]  && echo "    - guess cost (yescrypt cost factor 11 + 5 s fail delay)"
+    [ "$DO_ROOT_PATH" -eq 1 ]   && echo "    - root PATH integrity (drop unsafe entries, tighten directory modes)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2255,6 +2442,7 @@ main() {
     setup_home_permissions
     setup_process_isolation
     setup_guess_cost
+    setup_root_path
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

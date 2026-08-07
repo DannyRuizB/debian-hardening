@@ -354,6 +354,34 @@ got=$(val s23 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s23 >/dev/null 2>&1
 
+echo "-- 24. Skip a step: --no-root-path --------------------------"
+fresh_node s24 >/dev/null
+# Plant the trap in all three PATH sources plus an empty entry. With the step
+# skipped, the PATH sources must survive exactly as planted. The trap dir's
+# WRITE bits must survive too — but not its exact mode: the file-permissions
+# sweep still runs and adds the sticky bit to any world-writable dir it finds
+# (its documented job), so 777 legitimately becomes 1777 here.
+docker exec s24 bash -c "install -d -m 777 /opt/dh-path-loose &&
+  sed -i 's|^ENV_SUPATH.*|ENV_SUPATH\tPATH=/opt/dh-path-loose:/usr/local/sbin::/usr/local/bin:/usr/sbin:/usr/bin|' /etc/login.defs &&
+  sed -i '5s|PATH=\"[^\"]*\"|PATH=\"/opt/dh-path-loose:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin\"|' /etc/profile"
+docker exec s24 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-root-path -y >/dev/null 2>&1
+if docker exec s24 grep -q "::" /etc/login.defs 2>/dev/null; then
+  P "--no-root-path -> the planted empty entry survives in ENV_SUPATH"; else
+  F "--no-root-path should leave ENV_SUPATH alone" "empty entry gone"; fi
+if docker exec s24 grep -q dh-path-loose /etc/profile 2>/dev/null; then
+  P "--no-root-path -> the planted entry survives in /etc/profile"; else
+  F "--no-root-path should leave /etc/profile alone" "trap gone"; fi
+got=$(docker exec s24 stat -Lc %a /opt/dh-path-loose 2>/dev/null)
+case "$got" in
+  777|1777) P "--no-root-path -> the trap dir keeps its write bits (mode $got)" ;;
+  *)        F "--no-root-path should not strip the trap dir's write bits" "$got" ;;
+esac
+# ...but the rest of the baseline still applied:
+got=$(val s24 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s24 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

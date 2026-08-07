@@ -103,6 +103,26 @@ jobs:
             printf 'YESCRYPT_COST_FACTOR\t5\nFAIL_DELAY\t0\n' >> /etc/login.defs &&
             grep -E '^(YESCRYPT_COST_FACTOR|FAIL_DELAY)' /etc/login.defs"
 
+      # Step 32 offenders, planted in ALL THREE sources that set root's PATH
+      # on Debian (login.defs, /etc/profile — which OVERWRITES login.defs for
+      # login shells — and /etc/crontab). Two kinds on purpose, because the
+      # step treats them differently and that distinction IS the promise:
+      #   - fixable: /opt/dh-path-loose (exists, world-writable) and a
+      #     loosened /usr/local/bin — both must come back TIGHTENED and still
+      #     in the PATH. Deleting a directory the admin put there would break
+      #     locally installed binaries; the step fixes what it can.
+      #   - unfixable: an empty entry (= the current directory), a bare '.',
+      #     and /opt/dh-path-gone which does not exist — these must vanish.
+      - name: Plant PATH traps for step 32 to sanitize
+        run: |
+          docker exec db-harden-node bash -c "
+            install -d -m 777 /opt/dh-path-loose &&
+            chmod 777 /usr/local/bin &&
+            sed -i 's|^ENV_SUPATH.*|ENV_SUPATH\tPATH=/opt/dh-path-loose:/opt/dh-path-gone:/usr/local/sbin::/usr/local/bin:.:/usr/sbin:/usr/bin:/sbin:/bin|' /etc/login.defs &&
+            sed -i '5s|PATH=\"[^\"]*\"|PATH=\"/opt/dh-path-loose:/opt/dh-path-gone:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\"|' /etc/profile &&
+            sed -i 's|^PATH=.*|PATH=/opt/dh-path-gone:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|' /etc/crontab &&
+            grep -E '^ENV_SUPATH' /etc/login.defs && sed -n 5p /etc/profile"
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \
@@ -111,7 +131,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth"
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \
