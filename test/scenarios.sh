@@ -397,6 +397,21 @@ got=$(val s25 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s25 >/dev/null 2>&1
 
+echo "-- 26. Skip a step: --no-pw-history -------------------------"
+fresh_node s26
+docker exec s26 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-pw-history -y >/dev/null 2>&1
+if docker exec s26 test -f /usr/share/pam-configs/hardening-pwhistory 2>/dev/null; then
+  F "--no-pw-history should not write the pwhistory profile" "file exists"; else
+  P "--no-pw-history -> no pwhistory profile"; fi
+if docker exec s26 bash -c "grep -v '^#' /etc/pam.d/common-password | grep -q pam_pwhistory" 2>/dev/null; then
+  F "--no-pw-history should leave common-password without pam_pwhistory" "line present"; else
+  P "--no-pw-history -> common-password keeps its stock stack (no history)"; fi
+# ...but the rest of the baseline still applied:
+got=$(val s26 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s26 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
