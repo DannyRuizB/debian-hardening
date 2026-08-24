@@ -176,6 +176,7 @@
 #   --no-guess-cost        skip the guess-cost step (yescrypt cost factor + fail delay)
 #   --no-root-path         skip root PATH integrity (unsafe PATH entries + dir modes)
 #   --no-apt-sandboxing    skip the systemd sandboxing drop-in for the apt updater
+#   --no-pw-history        skip password history (pam_pwhistory, no reuse of old ones)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -221,6 +222,7 @@ DO_PROCESS_ISOLATION=1
 DO_GUESS_COST=1
 DO_ROOT_PATH=1
 DO_APT_SANDBOXING=1
+DO_PW_HISTORY=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -296,6 +298,7 @@ parse_args() {
             --no-guess-cost) DO_GUESS_COST=0; shift;;
             --no-root-path) DO_ROOT_PATH=0; shift;;
             --no-apt-sandboxing) DO_APT_SANDBOXING=0; shift;;
+            --no-pw-history) DO_PW_HISTORY=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2196,6 +2199,55 @@ EOF
     fi
 }
 
+setup_pw_history() {
+    [ "$DO_PW_HISTORY" -eq 1 ] || { log "Skipping password history"; return 0; }
+    log "Enforcing password history (no coming back to an old one)"
+    # The password arc so far: pwquality decides WHAT may be a password (15),
+    # aging decides WHEN it must change (7), faillock counts live misses (19)
+    # and guess-cost prices each try (31). This closes the loop: a forced
+    # change is pointless if the user can rotate straight back to the old
+    # password. pam_pwhistory keeps the last hashes in /etc/security/opasswd
+    # and refuses any new password that matches one of them.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would ensure /etc/security/opasswd exists as root:root 0600\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would enable a pam-auth-update profile wiring pam_pwhistory (remember=24, enforce_for_root) into common-password\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # opasswd holds password HASHES — the same sensitivity as shadow. This
+    # Debian ships it empty at 0600 already, but the file is the history
+    # database and the step owns its existence and its modes either way.
+    [ -f /etc/security/opasswd ] || touch /etc/security/opasswd
+    chown root:root /etc/security/opasswd
+    chmod 600 /etc/security/opasswd
+    # Position (measured on the node before writing this): the profile's
+    # priority decides where the line lands in common-password. 512 puts it
+    # below pwquality (1024) — strength is judged first, so history is never
+    # consulted about a password that would be rejected anyway — and above
+    # pam_unix (256), so reuse is refused BEFORE the change lands.
+    #
+    # enforce_for_root is not decoration (measured both ways): without it,
+    # a reuse performed by root — chpasswd included, it traverses this same
+    # stack — still PRINTS "Password has been already used" and then goes
+    # through anyway. A warning nobody acts on is not a control.
+    install -d -m 755 /usr/share/pam-configs
+    cat > /usr/share/pam-configs/hardening-pwhistory <<'EOF'
+Name: Password history — no coming back to an old one (debian-hardening)
+Default: yes
+Priority: 512
+Password-Type: Primary
+Password:
+	requisite			pam_pwhistory.so remember=24 use_authtok enforce_for_root
+EOF
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive pam-auth-update --package \
+            --enable hardening-pwhistory \
+            || warn "pam-auth-update could not enable the pwhistory profile"
+        ok "the last 24 passwords per account can no longer be reused (root included)"
+    else
+        warn "pam-auth-update not found — pwhistory profile written but not wired"
+    fi
+}
+
 # Judges one PATH entry, printing why it is unsafe (empty output = it is fine).
 # The check that matters is the LAST one, and it has a trap: on any modern
 # Debian /bin and /sbin are SYMLINKS into /usr (usrmerge), and a symlink is
@@ -2485,6 +2537,7 @@ main() {
     [ "$DO_GUESS_COST" -eq 1 ]  && echo "    - guess cost (yescrypt cost factor 11 + 5 s fail delay)"
     [ "$DO_ROOT_PATH" -eq 1 ]   && echo "    - root PATH integrity (drop unsafe entries, tighten directory modes)"
     [ "$DO_APT_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the apt updater (unattended-upgrades)"
+    [ "$DO_PW_HISTORY" -eq 1 ] && echo "    - password history (pam_pwhistory remember=24, root enforced too)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2527,6 +2580,7 @@ main() {
     setup_guess_cost
     setup_root_path
     setup_apt_sandboxing
+    setup_pw_history
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
