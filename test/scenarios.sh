@@ -412,6 +412,25 @@ got=$(val s26 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s26 >/dev/null 2>&1
 
+echo "-- 27. Skip a step: --no-ssh-crypto --------------------------"
+fresh_node s27
+docker exec s27 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ssh-crypto -y >/dev/null 2>&1
+if docker exec s27 test -f /etc/ssh/sshd_config.d/95-hardening-crypto.conf 2>/dev/null; then
+  F "--no-ssh-crypto should not write the crypto drop-in" "file exists"; else
+  P "--no-ssh-crypto -> no crypto drop-in"; fi
+# The stock negotiation lists survive: hmac-sha1 is still on offer (the
+# natural offender this step exists to retire).
+got=$(val s27 macs)
+case "$got" in
+  *hmac-sha1*) P "--no-ssh-crypto -> sshd still offers hmac-sha1 (stock lists intact)" ;;
+  *)           F "--no-ssh-crypto should leave the stock MAC list" "$got" ;;
+esac
+# ...but the rest of the baseline still applied:
+got=$(val s27 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s27 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

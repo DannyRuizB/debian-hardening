@@ -177,6 +177,7 @@
 #   --no-root-path         skip root PATH integrity (unsafe PATH entries + dir modes)
 #   --no-apt-sandboxing    skip the systemd sandboxing drop-in for the apt updater
 #   --no-pw-history        skip password history (pam_pwhistory, no reuse of old ones)
+#   --no-ssh-crypto        skip the SSH crypto policy (pinned ciphers/MACs/kex)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -223,6 +224,7 @@ DO_GUESS_COST=1
 DO_ROOT_PATH=1
 DO_APT_SANDBOXING=1
 DO_PW_HISTORY=1
+DO_SSH_CRYPTO=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -299,6 +301,7 @@ parse_args() {
             --no-root-path) DO_ROOT_PATH=0; shift;;
             --no-apt-sandboxing) DO_APT_SANDBOXING=0; shift;;
             --no-pw-history) DO_PW_HISTORY=0; shift;;
+            --no-ssh-crypto) DO_SSH_CRYPTO=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2499,6 +2502,70 @@ EOF
 }
 
 # ---- Main -----------------------------------------------------------------
+# ---- Step 35: SSH crypto policy (CIS 5.2) -----------------------------------
+
+setup_ssh_crypto() {
+    [ "$DO_SSH_CRYPTO" -eq 1 ] || { log "Skipping SSH crypto policy"; return 0; }
+    log "Pinning the SSH crypto policy (ciphers, MACs, key exchange)"
+    local dropin="/etc/ssh/sshd_config.d/95-hardening-crypto.conf"
+    # Stock OpenSSH 10 on Debian 13 still NEGOTIATES hmac-sha1 and the
+    # 64-bit-tag umac-64 when the client asks for them (measured on a fresh
+    # node: forcing `-o Ciphers=aes256-ctr -o MACs=hmac-sha1` gets a
+    # session), and its key-exchange list drags the NIST P-curves behind the
+    # modern hybrids. The MAC pin matters PRECISELY because ctr ciphers stay
+    # in the list: with an AEAD cipher (chacha20/GCM) OpenSSH skips MAC
+    # selection entirely — the MAC field is decorative — so the real
+    # downgrade path is a client asking for aes256-ctr + hmac-sha1, and a
+    # stock server obliges (measured both ways).
+    # Key exchange keeps only the post-quantum hybrids and curve25519 —
+    # what every current client offers first anyway, minus the NIST tail.
+    # The hybrids exist for "harvest now, decrypt later": a session recorded
+    # today should not become plaintext the day its owner buys the hardware.
+    # Precedence, measured: Debian includes sshd_config.d at the TOP of
+    # sshd_config and sshd honours the FIRST occurrence of a keyword, so
+    # this drop-in beats any legacy-compat Ciphers/MACs/Kex line someone
+    # left in the main file.
+    local content
+    content=$(cat <<'EOF'
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+# Crypto policy: what the transport may negotiate, pinned.
+#
+# AEAD first; ctr kept for compatibility — which is exactly why the MACs
+# line below matters (AEAD ignores the MAC, ctr does not).
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+# Encrypt-then-MAC only, 128-bit tags or better: no sha1, no umac-64.
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+# Post-quantum hybrids + curve25519. The NIST P-curve tail is gone.
+KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s:\n' "$c_yellow" "$c_reset" "$dropin"
+        printf '%s\n' "$content" | sed 's/^/        /'
+        return 0
+    fi
+    if ! command -v sshd >/dev/null 2>&1; then
+        warn "sshd not installed — SSH crypto policy skipped"
+        return 0
+    fi
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$content" ]; then
+        ok "SSH crypto policy already in place"
+        return 0
+    fi
+    install -d -m 755 /etc/ssh/sshd_config.d
+    printf '%s\n' "$content" > "$dropin"
+    chmod 644 "$dropin"
+    # Same contract as every sshd change in this script: validate before it
+    # goes live, revert if sshd rejects it — a bad config must never ship.
+    if sshd -t 2>/dev/null; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+        ok "SSH negotiates modern crypto only (no sha1, no NIST curves, PQ-ready)"
+    else
+        rm -f "$dropin"
+        err "sshd config validation failed after adding the crypto policy — reverted"
+    fi
+}
+
 main() {
     require_root
     check_debian
@@ -2538,6 +2605,7 @@ main() {
     [ "$DO_ROOT_PATH" -eq 1 ]   && echo "    - root PATH integrity (drop unsafe entries, tighten directory modes)"
     [ "$DO_APT_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the apt updater (unattended-upgrades)"
     [ "$DO_PW_HISTORY" -eq 1 ] && echo "    - password history (pam_pwhistory remember=24, root enforced too)"
+    [ "$DO_SSH_CRYPTO" -eq 1 ] && echo "    - SSH crypto policy (no sha1/umac-64 MACs, no NIST kex, PQ hybrids pinned)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2581,6 +2649,7 @@ main() {
     setup_root_path
     setup_apt_sandboxing
     setup_pw_history
+    setup_ssh_crypto
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
