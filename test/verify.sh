@@ -934,9 +934,13 @@ if crypto_probe -o Ciphers=aes256-ctr -o MACs=hmac-sha2-512-etm@openssh.com >/de
 else
   fail "the same ctr cipher with a strong MAC still logs in"
 fi
-# Post-quantum hybrid negotiates for real (sntrup761: in every client >= 9.0,
-# so the runner's ssh and this one both speak it).
-if crypto_probe -o KexAlgorithms=sntrup761x25519-sha512 >/dev/null 2>&1; then
+# Post-quantum hybrid negotiates for real. The VENDOR spelling on purpose:
+# the IANA name sntrup761x25519-sha512 only exists in clients >= 9.9, and
+# the CI runner's ssh is 9.6 — it knows only the @openssh.com name (there
+# since 8.5). The server pins both, so the probe must speak the older one
+# (this exact probe failed in CI under the IANA name — client-side, with
+# the server perfectly capable).
+if crypto_probe -o KexAlgorithms=sntrup761x25519-sha512@openssh.com >/dev/null 2>&1; then
   pass "post-quantum hybrid kex (sntrup761x25519) negotiates"
 else
   fail "post-quantum hybrid kex (sntrup761x25519) negotiates"
