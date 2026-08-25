@@ -43,8 +43,10 @@ cd test
 | 23 | `--no-guess-cost` | planted weak values (`YESCRYPT_COST_FACTOR 5`, `FAIL_DELAY 0`) survive untouched and `pam_faildelay` stays out of `common-auth` — while the password-policy step still pins `ENCRYPT_METHOD`, proving the two login.defs steps are independent |
 | 24 | `--no-root-path` | planted PATH offenders (a world-writable directory, an empty entry) survive untouched in `login.defs` and `/etc/profile`, and the loose directory keeps its mode — no other step looks at PATH, the rest still applies |
 | 25 | `--no-apt-sandboxing` | no sandbox drop-in is written and the `apt-daily-upgrade` unit keeps its stock (unconfined) `NoNewPrivileges=no` — the rest still applies |
+| 26 | `--no-pw-history` | no `pam_pwhistory` profile is written and `common-password` keeps its stock stack (old passwords stay reusable), the rest still applies |
+| 27 | `--no-ssh-crypto` | no crypto drop-in is written and `sshd` still *offers* `hmac-sha1` (the stock negotiation lists survive), the rest still applies |
 
-**Result: 58/58 checks pass.**
+**Result: 64/64 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
