@@ -150,6 +150,13 @@
 #      authentication at all). dpkg is asked first and only packages it
 #      knows get purged: apt-get exits 100 on a name the sources never
 #      heard of, and Debian 13 already dropped some of these.
+#  37. Filesystem protections (CIS 1.5.x): the fs.protected_* sysctls that
+#      defend the TOCTOU/symlink class in world-writable directories — a
+#      local user can't make root follow their symlink out of /tmp, open a
+#      hardlink to a file they can't read, or plant a FIFO/regular file for
+#      a root-run process to clobber. Its own drop-in, and the CI plants all
+#      four weak first because modern kernels ship them already on — the
+#      step must prove it TIGHTENS, not confirm a default.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -196,6 +203,7 @@
 #   --no-pw-history        skip password history (pam_pwhistory, no reuse of old ones)
 #   --no-ssh-crypto        skip the SSH crypto policy (pinned ciphers/MACs/kex)
 #   --no-legacy-protocols  skip the legacy protocol purge (telnet/rsh/talk/NIS/tftp/inetd)
+#   --no-fs-protected      skip the filesystem-protection sysctls (fs.protected_*)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -244,6 +252,7 @@ DO_APT_SANDBOXING=1
 DO_PW_HISTORY=1
 DO_SSH_CRYPTO=1
 DO_LEGACY_PROTOCOLS=1
+DO_FS_PROTECTED=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -322,6 +331,7 @@ parse_args() {
             --no-pw-history) DO_PW_HISTORY=0; shift;;
             --no-ssh-crypto) DO_SSH_CRYPTO=0; shift;;
             --no-legacy-protocols) DO_LEGACY_PROTOCOLS=0; shift;;
+            --no-fs-protected) DO_FS_PROTECTED=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2636,6 +2646,79 @@ setup_legacy_protocols() {
     ok "purged ${#present[@]} legacy protocol package(s): ${present[*]}"
 }
 
+# ---- Step 37: filesystem protections (CIS 1.5.x) ----------------------------
+
+FS_PROTECTED_DROPIN="/etc/sysctl.d/99-hardening-fs.conf"
+
+setup_fs_protected() {
+    [ "$DO_FS_PROTECTED" -eq 1 ] || { log "Skipping filesystem-protection sysctls"; return 0; }
+    log "Pinning filesystem-protection sysctls (fs.protected_*)"
+    # The symlink/hardlink TOCTOU class, in a world-writable directory the
+    # whole box shares. protected_symlinks: root (or any user) following a
+    # symlink in a sticky dir like /tmp only does so when the link's owner
+    # matches the directory's or the follower's — the trick where a local
+    # user swaps /tmp/foo for a symlink to /etc/shadow between a root
+    # process's check and its open stops working. protected_hardlinks: you
+    # can only hardlink to a file you could already read/write, so you can't
+    # pin someone else's sensitive file to keep it after they delete it.
+    # protected_fifos / protected_regular (kernel 4.19+): the same idea for
+    # FIFOs and regular files — a root-run process writing to a predictable
+    # /tmp path can't be tricked into clobbering an attacker-planted node.
+    # Values: 1 for the first three, 2 for regular (the strong setting that
+    # also covers same-owner writes in sticky world-writable dirs).
+    #
+    # Own drop-in, not the step-6 sysctl file, so --no-fs-protected and
+    # --no-sysctl stay independent — the per-step drop-in precedent.
+    local desired
+    desired=$(cat <<'EOF'
+# Managed by harden.sh (filesystem protections step). Edit the script, not this file.
+# Defend the TOCTOU/symlink class in world-writable dirs (/tmp): a local
+# user cannot make a privileged process follow their symlink, open a
+# hardlink to a file they can't read, or clobber a planted FIFO/regular.
+fs.protected_symlinks = 1
+fs.protected_hardlinks = 1
+fs.protected_fifos = 1
+fs.protected_regular = 2
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s and apply it with sysctl\n' "$c_yellow" "$c_reset" "$FS_PROTECTED_DROPIN"
+        return 0
+    fi
+    if [ -f "$FS_PROTECTED_DROPIN" ] && [ "$(cat "$FS_PROTECTED_DROPIN")" = "$desired" ]; then
+        ok "filesystem-protection drop-in already in place"
+    else
+        printf '%s\n' "$desired" > "$FS_PROTECTED_DROPIN"
+        chmod 644 "$FS_PROTECTED_DROPIN"
+        chown root:root "$FS_PROTECTED_DROPIN"
+        ok "Wrote $FS_PROTECTED_DROPIN"
+    fi
+    # Apply live. These are core-VFS knobs present on every kernel this
+    # script targets, but keep the same defensive shape as the other sysctl
+    # steps: a write that can't happen warns, never aborts.
+    local applied=0 skipped=0 k v
+    for kv in \
+        "fs.protected_symlinks 1" \
+        "fs.protected_hardlinks 1" \
+        "fs.protected_fifos 1" \
+        "fs.protected_regular 2"; do
+        k="${kv% *}"; v="${kv#* }"
+        if [ "$(sysctl -n "$k" 2>/dev/null || echo missing)" = "$v" ]; then
+            skipped=$((skipped + 1))
+        elif sysctl -q -w "$k=$v" 2>/dev/null; then
+            applied=$((applied + 1))
+        else
+            warn "$k not settable here — the drop-in applies where it can"
+        fi
+    done
+    if [ "$applied" -gt 0 ]; then
+        ok "Applied $applied filesystem-protection sysctl(s) live ($skipped already set)"
+    else
+        ok "filesystem-protection sysctls already at target ($skipped/4)"
+    fi
+    ok "Symlink/hardlink/FIFO games in world-writable directories are shut down"
+}
+
 main() {
     require_root
     check_debian
@@ -2677,6 +2760,7 @@ main() {
     [ "$DO_PW_HISTORY" -eq 1 ] && echo "    - password history (pam_pwhistory remember=24, root enforced too)"
     [ "$DO_SSH_CRYPTO" -eq 1 ] && echo "    - SSH crypto policy (no sha1/umac-64 MACs, no NIST kex, PQ hybrids pinned)"
     [ "$DO_LEGACY_PROTOCOLS" -eq 1 ] && echo "    - legacy protocol purge (telnet/rsh/talk/NIS/tftp/inetd family)"
+    [ "$DO_FS_PROTECTED" -eq 1 ] && echo "    - filesystem protections (fs.protected_symlinks/hardlinks/fifos/regular)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2722,6 +2806,7 @@ main() {
     setup_pw_history
     setup_ssh_crypto
     setup_legacy_protocols
+    setup_fs_protected
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

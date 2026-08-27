@@ -445,6 +445,23 @@ got=$(val s28 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s28 >/dev/null 2>&1
 
+echo "-- 29. Skip a step: --no-fs-protected ----------------------"
+fresh_node s29
+# Plant all four fs.protected_* weak, then skip the step: they must stay 0
+# (no other step touches them) while the rest of the baseline applies.
+docker exec s29 bash -c 'for f in symlinks hardlinks fifos regular; do echo 0 > /proc/sys/fs/protected_$f; done' >/dev/null 2>&1
+docker exec s29 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-fs-protected -y >/dev/null 2>&1
+got=$(docker exec s29 cat /proc/sys/fs/protected_symlinks 2>/dev/null)
+[ "$got" = 0 ] && P "--no-fs-protected -> the planted fs.protected_symlinks=0 survives" \
+               || F "--no-fs-protected should leave fs.protected_symlinks alone" "$got"
+if docker exec s29 test -f /etc/sysctl.d/99-hardening-fs.conf 2>/dev/null; then
+  F "--no-fs-protected should not write the drop-in" "file exists"; else
+  P "--no-fs-protected -> no fs-protection drop-in written"; fi
+got=$(val s29 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s29 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

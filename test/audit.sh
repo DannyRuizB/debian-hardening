@@ -605,6 +605,20 @@ case "$nis_st" in
   *) P "NIS is not installed (nobody serves the password map)";;
 esac
 
+echo "-- Filesystem protections (CIS 1.5.x) ------------------------"
+# Effective kernel values via sysctl on the node.
+for kv in protected_symlinks:1 protected_hardlinks:1 protected_fifos:1 protected_regular:2; do
+  key="fs.${kv%:*}"; want="${kv#*:}"
+  got=$(sctl "$key")
+  if [ "$got" = "$want" ]; then
+    P "$key = $got"
+  elif [ -z "$got" ]; then
+    W "$key is unreadable on this kernel" "expected $want (harden.sh fs-protections step)"
+  else
+    W "$key is $got, not $want" "run harden.sh (fs-protections step)"
+  fi
+done
+
 echo "-- Accounts & files -----------------------------------------"
 on_node getent group sudo | grep -qE ':.*[a-z]' \
   && P "A non-root sudo account exists ($(on_node getent group sudo | sed 's/.*://'))" \
