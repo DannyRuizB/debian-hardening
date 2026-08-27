@@ -133,6 +133,23 @@
 #      ProtectControlGroups. Deliberately WITHOUT ProtectSystem or
 #      RestrictSUIDSGID: both were measured to break apt (dpkg writes /usr and
 #      installs setuid binaries). If systemd rejects the drop-in, it's reverted.
+#  34. Password history (CIS 5.3.3): pam_pwhistory keeps the last 24 hashes
+#      per account in /etc/security/opasswd and refuses any new password
+#      that matches one — a forced change is pointless if the user rotates
+#      straight back. Wired via a pam-auth-update profile (priority 512,
+#      between pwquality and pam_unix), enforce_for_root included, and
+#      opasswd pinned root:root 0600 (it holds hashes).
+#  35. SSH crypto policy (CIS 5.2): what the transport may negotiate,
+#      pinned in its own drop-in — no hmac-sha1 / umac-64 MACs,
+#      encrypt-then-MAC only, and a key-exchange list of the post-quantum
+#      hybrids plus curve25519 (the NIST P-curve tail is gone). Validated
+#      with sshd -t, reverted if rejected.
+#  36. Legacy protocol purge (CIS 2.2/2.3): telnet, rsh, talk, NIS, tftp
+#      and the inetd superservers are purged — protocols whose DESIGN is
+#      the vulnerability (cleartext credentials, trust by source IP, no
+#      authentication at all). dpkg is asked first and only packages it
+#      knows get purged: apt-get exits 100 on a name the sources never
+#      heard of, and Debian 13 already dropped some of these.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -178,6 +195,7 @@
 #   --no-apt-sandboxing    skip the systemd sandboxing drop-in for the apt updater
 #   --no-pw-history        skip password history (pam_pwhistory, no reuse of old ones)
 #   --no-ssh-crypto        skip the SSH crypto policy (pinned ciphers/MACs/kex)
+#   --no-legacy-protocols  skip the legacy protocol purge (telnet/rsh/talk/NIS/tftp/inetd)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -225,6 +243,7 @@ DO_ROOT_PATH=1
 DO_APT_SANDBOXING=1
 DO_PW_HISTORY=1
 DO_SSH_CRYPTO=1
+DO_LEGACY_PROTOCOLS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -302,6 +321,7 @@ parse_args() {
             --no-apt-sandboxing) DO_APT_SANDBOXING=0; shift;;
             --no-pw-history) DO_PW_HISTORY=0; shift;;
             --no-ssh-crypto) DO_SSH_CRYPTO=0; shift;;
+            --no-legacy-protocols) DO_LEGACY_PROTOCOLS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2566,6 +2586,56 @@ EOF
     fi
 }
 
+# ---- Step 36: legacy protocol purge (CIS 2.2/2.3) ---------------------------
+
+# Packages whose protocol IS the vulnerability: telnet/rlogin/talk move
+# credentials and sessions in cleartext, NIS hands the password map to
+# whoever asks, tftp has no authentication at all, and the inetd
+# superservers exist to expose more of the above. Every variant Debian has
+# shipped is listed (netkit, inetutils, redone, hpa) — a wishlist, not an
+# inventory: dpkg decides below which of them actually exist on this box.
+LEGACY_PROTOCOL_PACKAGES=(
+    telnet inetutils-telnet telnetd inetutils-telnetd
+    rsh-client rsh-redone-client rsh-server rsh-redone-server
+    talk inetutils-talk talkd inetutils-talkd
+    nis tftp tftpd atftp atftpd tftp-hpa tftpd-hpa
+    xinetd openbsd-inetd inetutils-inetd
+)
+
+setup_legacy_protocols() {
+    [ "$DO_LEGACY_PROTOCOLS" -eq 1 ] || { log "Skipping legacy protocol purge"; return 0; }
+    log "Purging legacy network-protocol packages (CIS 2.2/2.3)"
+    # dpkg is asked FIRST and apt-get purge runs ONLY on packages dpkg has
+    # actually seen: `apt-get purge` exits 100 on a name the sources never
+    # heard of (measured: rsh-client has no installation candidate on
+    # Debian 13), which under `set -e` would abort the whole run over a
+    # package that was never there. config-files state counts as present:
+    # a removed-but-not-purged package still leaves its config behind.
+    #
+    # The transitional trap, also measured: on Debian 13 `telnet` is a dummy
+    # package whose payload is inetutils-telnet (wired through
+    # update-alternatives) — purging the dummy alone leaves /usr/bin/telnet
+    # working. The list names both halves of every such pair.
+    local pkg status
+    local present=()
+    for pkg in "${LEGACY_PROTOCOL_PACKAGES[@]}"; do
+        status=$(dpkg-query -W -f '${db:Status-Status}' "$pkg" 2>/dev/null) || true
+        case "$status" in
+            installed|config-files) present+=("$pkg");;
+        esac
+    done
+    if [ ${#present[@]} -eq 0 ]; then
+        ok "no legacy protocol packages present (${#LEGACY_PROTOCOL_PACKAGES[@]} names checked)"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would purge: %s\n' "$c_yellow" "$c_reset" "${present[*]}"
+        return 0
+    fi
+    run apt-get purge -y "${present[@]}"
+    ok "purged ${#present[@]} legacy protocol package(s): ${present[*]}"
+}
+
 main() {
     require_root
     check_debian
@@ -2606,6 +2676,7 @@ main() {
     [ "$DO_APT_SANDBOXING" -eq 1 ] && echo "    - systemd sandboxing drop-in for the apt updater (unattended-upgrades)"
     [ "$DO_PW_HISTORY" -eq 1 ] && echo "    - password history (pam_pwhistory remember=24, root enforced too)"
     [ "$DO_SSH_CRYPTO" -eq 1 ] && echo "    - SSH crypto policy (no sha1/umac-64 MACs, no NIST kex, PQ hybrids pinned)"
+    [ "$DO_LEGACY_PROTOCOLS" -eq 1 ] && echo "    - legacy protocol purge (telnet/rsh/talk/NIS/tftp/inetd family)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2650,6 +2721,7 @@ main() {
     setup_apt_sandboxing
     setup_pw_history
     setup_ssh_crypto
+    setup_legacy_protocols
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

@@ -45,8 +45,9 @@ cd test
 | 25 | `--no-apt-sandboxing` | no sandbox drop-in is written and the `apt-daily-upgrade` unit keeps its stock (unconfined) `NoNewPrivileges=no` — the rest still applies |
 | 26 | `--no-pw-history` | no `pam_pwhistory` profile is written and `common-password` keeps its stock stack (old passwords stay reusable), the rest still applies |
 | 27 | `--no-ssh-crypto` | no crypto drop-in is written and `sshd` still *offers* `hmac-sha1` (the stock negotiation lists survive), the rest still applies |
+| 28 | `--no-legacy-protocols` | a planted `telnet` client survives the run untouched (no other step purges packages), the rest still applies |
 
-**Result: 64/64 checks pass.**
+**Result: 66/66 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

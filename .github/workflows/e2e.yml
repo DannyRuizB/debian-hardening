@@ -149,6 +149,17 @@ jobs:
             printf 'MACs hmac-sha2-256,hmac-sha1\nKexAlgorithms ecdh-sha2-nistp256,curve25519-sha256\n' >> /etc/ssh/sshd_config &&
             sshd -t && tail -2 /etc/ssh/sshd_config"
 
+      # Step 36 offenders: a legacy client and a legacy superserver apt can
+      # still install on Debian 13 — and `telnet` is the transitional trap
+      # (a dummy package whose payload is inetutils-telnet via
+      # update-alternatives: purging the dummy alone leaves /usr/bin/telnet
+      # working). The purge must take the whole pair AND xinetd away.
+      - name: Plant legacy protocol packages for step 36 to purge
+        run: |
+          docker exec db-harden-node bash -c "
+            apt-get install -y --no-install-recommends telnet xinetd >/dev/null &&
+            command -v telnet && dpkg-query -W telnet inetutils-telnet xinetd"
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \
