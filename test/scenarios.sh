@@ -431,6 +431,20 @@ got=$(val s27 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s27 >/dev/null 2>&1
 
+echo "-- 28. Skip a step: --no-legacy-protocols ------------------"
+fresh_node s28
+# Plant the natural offender the step exists to purge, then skip the step:
+# the planted client must survive while the rest of the baseline applies.
+docker exec s28 apt-get install -y --no-install-recommends telnet >/dev/null 2>&1
+docker exec s28 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-legacy-protocols -y >/dev/null 2>&1
+if docker exec s28 sh -c 'command -v telnet' >/dev/null 2>&1; then
+  P "--no-legacy-protocols -> the planted telnet client survives"; else
+  F "--no-legacy-protocols should leave telnet installed" "gone"; fi
+got=$(val s28 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s28 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
