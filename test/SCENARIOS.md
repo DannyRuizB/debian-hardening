@@ -46,8 +46,9 @@ cd test
 | 26 | `--no-pw-history` | no `pam_pwhistory` profile is written and `common-password` keeps its stock stack (old passwords stay reusable), the rest still applies |
 | 27 | `--no-ssh-crypto` | no crypto drop-in is written and `sshd` still *offers* `hmac-sha1` (the stock negotiation lists survive), the rest still applies |
 | 28 | `--no-legacy-protocols` | a planted `telnet` client survives the run untouched (no other step purges packages), the rest still applies |
+| 29 | `--no-fs-protected` | planted `fs.protected_*=0` values survive and no `99-hardening-fs.conf` drop-in is written (no other step touches them), the rest still applies |
 
-**Result: 66/66 checks pass.**
+**Result: 69/69 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
