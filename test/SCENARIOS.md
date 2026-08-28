@@ -47,8 +47,9 @@ cd test
 | 27 | `--no-ssh-crypto` | no crypto drop-in is written and `sshd` still *offers* `hmac-sha1` (the stock negotiation lists survive), the rest still applies |
 | 28 | `--no-legacy-protocols` | a planted `telnet` client survives the run untouched (no other step purges packages), the rest still applies |
 | 29 | `--no-fs-protected` | planted `fs.protected_*=0` values survive and no `99-hardening-fs.conf` drop-in is written (no other step touches them), the rest still applies |
+| 30 | `--no-account-hygiene` | the planted NIS `+` entry, the hash sitting in `/etc/passwd` and the empty password all survive — pressing Enter still authenticates (behavioral, `nullok`) — while the rest still applies |
 
-**Result: 69/69 checks pass.**
+**Result: 73/73 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

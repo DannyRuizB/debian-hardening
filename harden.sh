@@ -157,6 +157,19 @@
 #      a root-run process to clobber. Its own drop-in, and the CI plants all
 #      four weak first because modern kernels ship them already on — the
 #      step must prove it TIGHTENS, not confirm a default.
+#  38. Account database hygiene (CIS 6.2): the logins hiding in the account
+#      DATA, invisible to every PAM-stack step. Legacy NIS compat entries
+#      ('+'/'-' lines) are removed from passwd/shadow/group — inert today,
+#      but the day nsswitch flips to `compat` an unrestricted '+' imports
+#      every NIS account, uid 0 included. A password hash sitting in
+#      world-readable /etc/passwd still authenticates (measured) AND is an
+#      offline cracking target for every local user — pwconv moves it into
+#      /etc/shadow with the password intact. And an EMPTY password field in
+#      /etc/shadow is a free login: Debian ships pam_unix with `nullok`, so
+#      pressing Enter IS the password (measured) — those accounts get
+#      locked (reversible with passwd -u once a real password is set).
+#      Runs BEFORE the account-policy steps, so aging applies to a freshly
+#      migrated hash in the same pass.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -204,6 +217,8 @@
 #   --no-ssh-crypto        skip the SSH crypto policy (pinned ciphers/MACs/kex)
 #   --no-legacy-protocols  skip the legacy protocol purge (telnet/rsh/talk/NIS/tftp/inetd)
 #   --no-fs-protected      skip the filesystem-protection sysctls (fs.protected_*)
+#   --no-account-hygiene   skip account database hygiene (NIS '+' entries,
+#                          unshadowed hashes, empty passwords)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -253,6 +268,7 @@ DO_PW_HISTORY=1
 DO_SSH_CRYPTO=1
 DO_LEGACY_PROTOCOLS=1
 DO_FS_PROTECTED=1
+DO_ACCOUNT_HYGIENE=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -332,6 +348,7 @@ parse_args() {
             --no-ssh-crypto) DO_SSH_CRYPTO=0; shift;;
             --no-legacy-protocols) DO_LEGACY_PROTOCOLS=0; shift;;
             --no-fs-protected) DO_FS_PROTECTED=0; shift;;
+            --no-account-hygiene) DO_ACCOUNT_HYGIENE=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2719,6 +2736,88 @@ EOF
     ok "Symlink/hardlink/FIFO games in world-writable directories are shut down"
 }
 
+# ---- Step 38: account database hygiene (CIS 6.2) ---------------------------
+
+setup_account_hygiene() {
+    [ "$DO_ACCOUNT_HYGIENE" -eq 1 ] || { log "Skipping account database hygiene"; return 0; }
+    log "Account database hygiene: NIS entries, unshadowed hashes, empty passwords (CIS 6.2)"
+    # Three ways the account DATABASE hands out logins on its own — invisible
+    # to every step that hardens the PAM stack, because the hole is in the
+    # data, not in the modules:
+    #
+    #   * NIS compat entries: a line starting with '+' or '-' in passwd/
+    #     shadow/group is a legacy "splice the NIS map in here" marker. With
+    #     nsswitch on `files` (the Debian default) they are inert TODAY, but
+    #     the day someone flips a service to `compat`, an unrestricted
+    #     '+::0:0:::' imports every NIS account — uid 0 included. Step 36
+    #     purged the NIS packages; this removes the trigger data. They also
+    #     pollute every field scan below, so they go first.
+    #   * A hash in /etc/passwd's password field AUTHENTICATES (measured:
+    #     pam_unix accepts it) — and passwd is world-readable, so that hash
+    #     is an offline cracking target for every local account. pwconv
+    #     moves it into /etc/shadow (0640 root:shadow); the password keeps
+    #     working — measured, the login moves, it doesn't break.
+    #   * An EMPTY password field in /etc/shadow: Debian ships pam_unix with
+    #     `nullok`, so pressing Enter IS that account's password (measured
+    #     with pamtester on a stock node). Locking the field closes the door
+    #     for humans and services alike; `passwd -u` reopens it once a real
+    #     password is set. pwconv turns an empty PASSWD field into an empty
+    #     SHADOW field, which is why this check runs last.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would drop NIS +/- entries, shadow any passwd-file hash (pwconv) and lock empty passwords\n' \
+            "$c_yellow" "$c_reset"
+        return 0
+    fi
+
+    # 1. NIS compat ('+'/'-') entries out of the whole account database.
+    local f n purged=0
+    for f in /etc/passwd /etc/shadow /etc/group /etc/gshadow; do
+        [ -f "$f" ] || continue
+        n=$(grep -c '^[+-]' "$f" || true)
+        if [ "$n" -gt 0 ]; then
+            sed -i '/^[+-]/d' "$f"
+            warn "removed $n NIS compat entry(ies) from $f"
+            purged=$((purged + n))
+        fi
+    done
+    [ "$purged" -eq 0 ] && ok "no NIS compat entries in the account database"
+
+    # 2. Password material out of world-readable /etc/passwd.
+    local unshadowed
+    unshadowed=$(awk -F: '$2 != "x" {print $1}' /etc/passwd | tr '\n' ' ')
+    if [ -n "${unshadowed// /}" ]; then
+        pwconv
+        warn "moved the password field of: ${unshadowed}into /etc/shadow (pwconv)"
+        if awk -F: '$2 != "x" {bad = 1} END {exit bad}' /etc/passwd; then
+            ok "every /etc/passwd password field is now a shadow pointer"
+        else
+            warn "pwconv left an unshadowed field behind — inspect /etc/passwd"
+        fi
+    else
+        ok "all /etc/passwd password fields already shadowed"
+    fi
+
+    # 3. Empty password fields in /etc/shadow -> locked.
+    # if-fi, not `[ ] &&`: a bare test as the loop body's last command leaves
+    # the loop with rc 1 on a populated final line, and set -e kills the run.
+    local name pass empties=()
+    while IFS=: read -r name pass _; do
+        if [ -z "$pass" ]; then
+            empties+=("$name")
+        fi
+    done < /etc/shadow
+    if [ "${#empties[@]}" -gt 0 ]; then
+        for name in "${empties[@]}"; do
+            passwd -l "$name" >/dev/null 2>&1 || warn "could not lock $name"
+            [ "$name" = root ] && warn "root had an EMPTY password — locked; console recovery now needs init=/bin/bash or a reset"
+        done
+        warn "locked ${#empties[@]} account(s) whose password was EMPTY (nullok made them free logins): ${empties[*]}"
+    else
+        ok "no account has an empty password"
+    fi
+    ok "The account database no longer hands out logins on its own"
+}
+
 main() {
     require_root
     check_debian
@@ -2730,6 +2829,7 @@ main() {
     [ "$DO_FAIL2BAN" -eq 1 ]    && echo "    - Fail2Ban sshd jail"
     [ "$DO_AUTOUPDATES" -eq 1 ] && echo "    - unattended security upgrades"
     [ "$DO_SYSCTL" -eq 1 ]      && echo "    - kernel hardening (sysctl drop-in)"
+    [ "$DO_ACCOUNT_HYGIENE" -eq 1 ] && echo "    - account database hygiene (NIS '+' entries, unshadowed hashes, empty passwords)"
     [ "$DO_ACCOUNT_POLICIES" -eq 1 ] && echo "    - account policies (password aging + inactivity lock)"
     [ "$DO_MOUNT_OPTIONS" -eq 1 ]    && echo "    - mount options (/dev/shm nodev,nosuid,noexec)"
     [ "$DO_BANNERS" -eq 1 ]          && echo "    - warning banners (issue/issue.net/motd + sshd Banner)"
@@ -2776,6 +2876,12 @@ main() {
     setup_fail2ban
     setup_autoupdates
     setup_sysctl
+    # Step 38 runs BEFORE the account-policy steps on purpose: pwconv moves a
+    # passwd-file hash into /etc/shadow, and the aging step only applies its
+    # policy to accounts whose shadow entry holds a real hash — hygiene last
+    # would leave that account unaged until the NEXT run (caught by the
+    # idempotence gate: /etc/shadow changed on the second pass).
+    setup_account_hygiene
     setup_account_policies
     setup_mount_options
     setup_banners
