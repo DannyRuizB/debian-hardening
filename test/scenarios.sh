@@ -492,6 +492,26 @@ got=$(val s30 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s30 >/dev/null 2>&1
 
+echo "-- 31. Skip a step: --no-exploit-mitigations ----------------"
+fresh_node s31
+# Plant ASLR off, then skip the step: it must stay 0 (no other step touches
+# it) while the rest applies. These sysctls are HOST-GLOBAL in a privileged
+# container, so the scenario restores full ASLR itself at the end — leaving
+# a lab host without ASLR would be worse than the thing being tested.
+docker exec s31 bash -c 'echo 0 > /proc/sys/kernel/randomize_va_space' >/dev/null 2>&1
+docker exec s31 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-exploit-mitigations -y >/dev/null 2>&1
+got=$(docker exec s31 cat /proc/sys/kernel/randomize_va_space 2>/dev/null)
+[ "$got" = 0 ] && P "--no-exploit-mitigations -> the planted randomize_va_space=0 survives" \
+               || F "--no-exploit-mitigations should leave ASLR alone" "$got"
+if docker exec s31 test -f /etc/sysctl.d/99-hardening-exploit.conf 2>/dev/null; then
+  F "--no-exploit-mitigations should not write the drop-in" "file exists"; else
+  P "--no-exploit-mitigations -> no exploit-mitigation drop-in written"; fi
+got=$(val s31 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker exec s31 bash -c 'echo 2 > /proc/sys/kernel/randomize_va_space' >/dev/null 2>&1
+docker rm -f s31 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

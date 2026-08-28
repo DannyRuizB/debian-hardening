@@ -170,6 +170,17 @@
 #      locked (reversible with passwd -u once a real password is set).
 #      Runs BEFORE the account-policy steps, so aging applies to a freshly
 #      migrated hash in the same pass.
+#  39. Exploit mitigations (CIS 1.5.1 + kernel attack surface): the sysctls
+#      that make the standard exploit primitives expensive. ASLR pinned to
+#      full (kernel.randomize_va_space=2 — a debugging session that left it
+#      at 0 hands every attacker fixed addresses), kexec disabled
+#      (kexec_load_disabled=1, one-way: nobody soft-boots an unsigned
+#      kernel), unprivileged BPF off (unprivileged_bpf_disabled=1, one-way:
+#      the JIT-spray/verifier-bug surface needs root now), the BPF JIT
+#      blinded where the kernel has the knob (net.core.bpf_jit_harden=2),
+#      and perf events restricted to root (perf_event_paranoid=3 — the
+#      side-channel listening post). Own drop-in; live writes warn, never
+#      abort (the sysctl-step shape).
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -219,6 +230,8 @@
 #   --no-fs-protected      skip the filesystem-protection sysctls (fs.protected_*)
 #   --no-account-hygiene   skip account database hygiene (NIS '+' entries,
 #                          unshadowed hashes, empty passwords)
+#   --no-exploit-mitigations skip the exploit-mitigation sysctls (ASLR, kexec,
+#                          unprivileged BPF, JIT hardening, perf events)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -269,6 +282,7 @@ DO_SSH_CRYPTO=1
 DO_LEGACY_PROTOCOLS=1
 DO_FS_PROTECTED=1
 DO_ACCOUNT_HYGIENE=1
+DO_EXPLOIT_MITIGATIONS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -349,6 +363,7 @@ parse_args() {
             --no-legacy-protocols) DO_LEGACY_PROTOCOLS=0; shift;;
             --no-fs-protected) DO_FS_PROTECTED=0; shift;;
             --no-account-hygiene) DO_ACCOUNT_HYGIENE=0; shift;;
+            --no-exploit-mitigations) DO_EXPLOIT_MITIGATIONS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -2818,6 +2833,88 @@ setup_account_hygiene() {
     ok "The account database no longer hands out logins on its own"
 }
 
+# ---- Step 39: exploit mitigations (CIS 1.5.1 + kernel attack surface) -------
+EXPLOIT_DROPIN=/etc/sysctl.d/99-hardening-exploit.conf
+
+setup_exploit_mitigations() {
+    [ "$DO_EXPLOIT_MITIGATIONS" -eq 1 ] || { log "Skipping exploit-mitigation sysctls"; return 0; }
+    log "Pinning exploit-mitigation sysctls (ASLR, kexec, unprivileged BPF, JIT, perf)"
+    # The knobs that make the STANDARD exploit primitives expensive:
+    #   randomize_va_space=2 (CIS 1.5.1): full ASLR — stack, mmap, heap. The
+    #     classic regression is a debugging session that set it to 0 and a
+    #     reboot that never happened; with it off, two runs of a binary get
+    #     the SAME addresses (measured on the node: identical stack base)
+    #     and every hardcoded-address exploit works first try.
+    #   kexec_load_disabled=1: kexec lets root soft-boot a NEW kernel with
+    #     no firmware, no secure boot, no console trace. ONE-WAY by design —
+    #     once set, not even root can clear it without a real reboot, so a
+    #     compromise can't quietly re-arm it.
+    #   unprivileged_bpf_disabled=1: unprivileged BPF hands every local
+    #     account a JIT and a kernel-side interpreter to aim verifier bugs
+    #     at (Spectre gadgets included). Debian ships 2 (off, but root can
+    #     flip it back live); 1 is the ONE-WAY latch. Loading BPF becomes
+    #     root's problem, which is where CAP_BPF lives anyway.
+    #   net.core.bpf_jit_harden=2: where the kernel has the knob, blind the
+    #     JIT's constants for ALL users — the classic JIT-spray defence.
+    #     Some kernels (this WSL one, measured) don't expose it: the drop-in
+    #     carries the line for the kernels that do, the live write warns.
+    #   perf_event_paranoid=3: perf is a measurement rig pointed at the
+    #     kernel — a fine side-channel listening post. 3 (Debian/Ubuntu
+    #     patch) keeps it root-only.
+    local desired
+    desired=$(cat <<'EOF'
+# Managed by harden.sh (exploit mitigations step). Edit the script, not this file.
+# Make the standard exploit primitives expensive: full ASLR, no kexec into
+# an unsigned kernel, no unprivileged BPF, a blinded BPF JIT, perf for root.
+kernel.randomize_va_space = 2
+kernel.kexec_load_disabled = 1
+kernel.unprivileged_bpf_disabled = 1
+net.core.bpf_jit_harden = 2
+kernel.perf_event_paranoid = 3
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s and apply it with sysctl\n' "$c_yellow" "$c_reset" "$EXPLOIT_DROPIN"
+        return 0
+    fi
+    if [ -f "$EXPLOIT_DROPIN" ] && [ "$(cat "$EXPLOIT_DROPIN")" = "$desired" ]; then
+        ok "exploit-mitigation drop-in already in place"
+    else
+        printf '%s\n' "$desired" > "$EXPLOIT_DROPIN"
+        chmod 644 "$EXPLOIT_DROPIN"
+        chown root:root "$EXPLOIT_DROPIN"
+        ok "Wrote $EXPLOIT_DROPIN"
+    fi
+    # Live, with the sysctl-step shape: a write that can't happen warns and
+    # never aborts. A key the kernel doesn't expose (bpf_jit_harden on some
+    # builds) gets a note, not a failure — the drop-in still carries it for
+    # the kernels that do.
+    local applied=0 skipped=0 k v
+    for kv in \
+        "kernel.randomize_va_space 2" \
+        "kernel.kexec_load_disabled 1" \
+        "kernel.unprivileged_bpf_disabled 1" \
+        "net.core.bpf_jit_harden 2" \
+        "kernel.perf_event_paranoid 3"; do
+        k="${kv% *}"; v="${kv#* }"
+        if [ ! -e "/proc/sys/${k//./\/}" ]; then
+            warn "$k does not exist on this kernel — pinned in the drop-in for kernels that have it"
+        elif [ "$(sysctl -n "$k" 2>/dev/null || echo missing)" = "$v" ]; then
+            skipped=$((skipped + 1))
+        elif sysctl -q -w "$k=$v" 2>/dev/null; then
+            applied=$((applied + 1))
+        else
+            warn "$k not settable here — the drop-in applies where it can"
+        fi
+    done
+    if [ "$applied" -gt 0 ]; then
+        ok "Applied $applied exploit-mitigation sysctl(s) live ($skipped already set)"
+    else
+        ok "exploit-mitigation sysctls already at target ($skipped present and set)"
+    fi
+    ok "Fixed addresses, soft-booted kernels and unprivileged BPF are off the table"
+}
+
 main() {
     require_root
     check_debian
@@ -2861,6 +2958,7 @@ main() {
     [ "$DO_SSH_CRYPTO" -eq 1 ] && echo "    - SSH crypto policy (no sha1/umac-64 MACs, no NIST kex, PQ hybrids pinned)"
     [ "$DO_LEGACY_PROTOCOLS" -eq 1 ] && echo "    - legacy protocol purge (telnet/rsh/talk/NIS/tftp/inetd family)"
     [ "$DO_FS_PROTECTED" -eq 1 ] && echo "    - filesystem protections (fs.protected_symlinks/hardlinks/fifos/regular)"
+    [ "$DO_EXPLOIT_MITIGATIONS" -eq 1 ] && echo "    - exploit mitigations (full ASLR, no kexec, no unprivileged BPF, blinded JIT, perf root-only)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -2913,6 +3011,7 @@ main() {
     setup_ssh_crypto
     setup_legacy_protocols
     setup_fs_protected
+    setup_exploit_mitigations
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

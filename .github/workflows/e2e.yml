@@ -172,6 +172,26 @@ jobs:
             for f in symlinks hardlinks fifos regular; do echo 0 > /proc/sys/fs/protected_$f; done
             grep -H . /proc/sys/fs/protected_symlinks /proc/sys/fs/protected_regular'
 
+      # Step 39 offenders: the runner ships full ASLR and a soft-disabled
+      # unprivileged BPF, so plant the classic weak values (a debugging
+      # session's randomize_va_space=0, BPF fully open, perf at the
+      # everything-goes -1) via /proc — sysctl isn't installed pre-harden.
+      # kexec_load_disabled is a natural offender (ships 0) and is one-way,
+      # so there is nothing to plant. The two greps log the smoking gun:
+      # with ASLR off, two fresh processes print the SAME stack base.
+      - name: Plant exploit-mitigation offenders for step 39 to fix
+        run: |
+          docker exec db-harden-node bash -c '
+            echo 0 > /proc/sys/kernel/randomize_va_space
+            echo 0 > /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null \
+              || echo "unprivileged_bpf_disabled already latched at 1 (one-way) - nothing to plant"
+            echo -1 > /proc/sys/kernel/perf_event_paranoid
+            if [ -e /proc/sys/net/core/bpf_jit_harden ]; then echo 0 > /proc/sys/net/core/bpf_jit_harden; fi
+            echo "ASLR planted off — two fresh processes, same stack base:"
+            grep -m1 "\[stack\]" /proc/self/maps | cut -d- -f1
+            grep -m1 "\[stack\]" /proc/self/maps | cut -d- -f1
+            grep -H . /proc/sys/kernel/randomize_va_space /proc/sys/kernel/unprivileged_bpf_disabled /proc/sys/kernel/perf_event_paranoid'
+
       # Step 38 offenders — the logins that hide in the account DATA, all
       # three measured to work on a stock node before the step was written:
       # an EMPTY password authenticates with a bare Enter (pam_unix ships
@@ -201,7 +221,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab /usr/share/pam-configs/hardening-pwhistory /etc/pam.d/common-password /etc/security/opasswd /etc/ssh/sshd_config.d/95-hardening-crypto.conf /etc/sysctl.d/99-hardening-fs.conf /etc/shadow /etc/group"
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab /usr/share/pam-configs/hardening-pwhistory /etc/pam.d/common-password /etc/security/opasswd /etc/ssh/sshd_config.d/95-hardening-crypto.conf /etc/sysctl.d/99-hardening-fs.conf /etc/shadow /etc/group /etc/sysctl.d/99-hardening-exploit.conf"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \
