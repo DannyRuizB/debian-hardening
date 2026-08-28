@@ -92,11 +92,11 @@ baseline database was built, and a daily check timer is enabled. Step 17
 rkhunter installed, the property baseline present, and a daily check timer
 enabled. Every step since has kept the pattern — the audit grows a section
 when harden.sh grows a step, so the score always grades what the script
-actually promises (the home-directory sweep and the process-isolation
-doors are the two most recent). Current score on a freshly hardened node:
+actually promises — whatever the most recent step happens to be. Current
+score on a freshly hardened node:
 
 ```
- Score: 122 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 131 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty

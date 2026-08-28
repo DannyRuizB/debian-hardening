@@ -43,6 +43,7 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
   [[ "$output" == *"--no-ssh-crypto"* ]]
   [[ "$output" == *"--no-legacy-protocols"* ]]
   [[ "$output" == *"--no-fs-protected"* ]]
+  [[ "$output" == *"--no-account-hygiene"* ]]
   [[ "$output" == *"-h, --help"* ]]
 }
 
@@ -79,8 +80,8 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
 }
 
 @test "the per-step --no-* flags each set their toggle to 0" {
-  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening --no-ssh-policies --no-coredump-limits --no-umask-tmout --no-cron-restrictions --no-password-policy --no-aide --no-rkhunter --no-module-blacklist --no-faillock --no-file-permissions --no-ssh-access --no-service-sandboxing --no-journald --no-su-restriction --no-system-accounts --no-log-permissions --no-logrotate-perms --no-auditd --no-home-permissions --no-process-isolation --no-guess-cost --no-root-path --no-apt-sandboxing --no-pw-history --no-ssh-crypto --no-legacy-protocols --no-fs-protected; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING \$DO_SSH_POLICIES \$DO_COREDUMP_LIMITS \$DO_UMASK_TMOUT \$DO_CRON_RESTRICTIONS \$DO_PASSWORD_POLICY \$DO_AIDE \$DO_RKHUNTER \$DO_MODULE_BLACKLIST \$DO_FAILLOCK \$DO_FILE_PERMISSIONS \$DO_SSH_ACCESS \$DO_SERVICE_SANDBOXING \$DO_JOURNALD \$DO_SU_RESTRICTION \$DO_SYSTEM_ACCOUNTS \$DO_LOG_PERMISSIONS \$DO_LOGROTATE_PERMS \$DO_AUDITD \$DO_HOME_PERMISSIONS \$DO_PROCESS_ISOLATION \$DO_GUESS_COST \$DO_ROOT_PATH \$DO_APT_SANDBOXING \$DO_PW_HISTORY \$DO_SSH_CRYPTO \$DO_LEGACY_PROTOCOLS \$DO_FS_PROTECTED\""
-  [ "$output" = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" ]
+  run bash -c "source '$SCRIPT'; parse_args --no-ssh --no-ufw --no-fail2ban --no-autoupdates --no-sysctl --no-account-policies --no-mount-options --no-banners --no-sudo-hardening --no-ssh-policies --no-coredump-limits --no-umask-tmout --no-cron-restrictions --no-password-policy --no-aide --no-rkhunter --no-module-blacklist --no-faillock --no-file-permissions --no-ssh-access --no-service-sandboxing --no-journald --no-su-restriction --no-system-accounts --no-log-permissions --no-logrotate-perms --no-auditd --no-home-permissions --no-process-isolation --no-guess-cost --no-root-path --no-apt-sandboxing --no-pw-history --no-ssh-crypto --no-legacy-protocols --no-fs-protected --no-account-hygiene; echo \"\$DO_SSH \$DO_UFW \$DO_FAIL2BAN \$DO_AUTOUPDATES \$DO_SYSCTL \$DO_ACCOUNT_POLICIES \$DO_MOUNT_OPTIONS \$DO_BANNERS \$DO_SUDO_HARDENING \$DO_SSH_POLICIES \$DO_COREDUMP_LIMITS \$DO_UMASK_TMOUT \$DO_CRON_RESTRICTIONS \$DO_PASSWORD_POLICY \$DO_AIDE \$DO_RKHUNTER \$DO_MODULE_BLACKLIST \$DO_FAILLOCK \$DO_FILE_PERMISSIONS \$DO_SSH_ACCESS \$DO_SERVICE_SANDBOXING \$DO_JOURNALD \$DO_SU_RESTRICTION \$DO_SYSTEM_ACCOUNTS \$DO_LOG_PERMISSIONS \$DO_LOGROTATE_PERMS \$DO_AUDITD \$DO_HOME_PERMISSIONS \$DO_PROCESS_ISOLATION \$DO_GUESS_COST \$DO_ROOT_PATH \$DO_APT_SANDBOXING \$DO_PW_HISTORY \$DO_SSH_CRYPTO \$DO_LEGACY_PROTOCOLS \$DO_FS_PROTECTED \$DO_ACCOUNT_HYGIENE\""
+  [ "$output" = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" ]
 }
 
 @test "--allow-port accumulates into EXTRA_PORTS" {

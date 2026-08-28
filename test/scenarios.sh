@@ -462,6 +462,36 @@ got=$(val s29 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s29 >/dev/null 2>&1
 
+echo "-- 30. Skip a step: --no-account-hygiene --------------------"
+fresh_node s30
+# Plant the three data-level logins, then skip the step: the NIS '+' entry,
+# the passwd-file hash and the empty password must all survive (no other
+# step touches account-database CONTENT) while the rest of the baseline
+# applies. The empty-password check is behavioral: pressing Enter must
+# still authenticate, nullok and all.
+docker exec s30 bash -c '
+  useradd --create-home --shell /bin/bash dhnopw && passwd -d dhnopw &&
+  useradd --create-home --shell /bin/bash dhlegacy &&
+  echo "dhlegacy:Sh4dow-Migr8-OK!9" | chpasswd &&
+  h=$(grep "^dhlegacy:" /etc/shadow | cut -d: -f2) &&
+  sed -i "s|^dhlegacy:x:|dhlegacy:$h:|" /etc/passwd &&
+  sed -i "s|^dhlegacy:[^:]*:|dhlegacy:*:|" /etc/shadow &&
+  printf "+::0:0:::\n" >> /etc/passwd' >/dev/null 2>&1
+docker exec s30 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-account-hygiene -y >/dev/null 2>&1
+if docker exec s30 grep -q '^+' /etc/passwd 2>/dev/null; then
+  P "--no-account-hygiene -> the planted NIS '+' entry survives"; else
+  F "--no-account-hygiene should leave the '+' entry alone" "gone"; fi
+got=$(docker exec s30 bash -c 'grep "^dhlegacy:" /etc/passwd | cut -d: -f2 | cut -c1' 2>/dev/null)
+[ "$got" = '$' ] && P "--no-account-hygiene -> the passwd-file hash stays unshadowed" \
+                 || F "--no-account-hygiene should leave the passwd-file hash" "field starts with '$got'"
+if docker exec s30 bash -c 'printf "\n" | pamtester login dhnopw authenticate' >/dev/null 2>&1; then
+  P "--no-account-hygiene -> pressing Enter still authenticates (nullok, empty password)"; else
+  F "--no-account-hygiene should leave the empty password usable" "auth refused"; fi
+got=$(val s30 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s30 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
