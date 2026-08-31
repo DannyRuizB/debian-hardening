@@ -512,6 +512,21 @@ got=$(val s31 permitrootlogin)
 docker exec s31 bash -c 'echo 2 > /proc/sys/kernel/randomize_va_space' >/dev/null 2>&1
 docker rm -f s31 >/dev/null 2>&1
 
+echo "-- 32. Skip a step: --no-tmp-confinement --------------------"
+fresh_node s32
+docker exec s32 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-tmp-confinement -y >/dev/null 2>&1
+# The dropper's move must still WORK with the step skipped: stage in /tmp, run.
+if docker exec s32 bash -c 'cp /bin/true /tmp/dh-probe && /tmp/dh-probe' >/dev/null 2>&1; then
+  P "--no-tmp-confinement -> a binary in /tmp still executes (step skipped)"; else
+  F "--no-tmp-confinement should leave /tmp executable" "exec refused"; fi
+if docker exec s32 grep -qE '^[^#].*[[:space:]]/tmp[[:space:]]' /etc/fstab 2>/dev/null; then
+  F "--no-tmp-confinement should not pin /tmp in fstab" "entry exists"; else
+  P "--no-tmp-confinement -> no /tmp entry written to fstab"; fi
+got=$(val s32 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s32 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

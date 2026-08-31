@@ -49,8 +49,9 @@ cd test
 | 29 | `--no-fs-protected` | planted `fs.protected_*=0` values survive and no `99-hardening-fs.conf` drop-in is written (no other step touches them), the rest still applies |
 | 30 | `--no-account-hygiene` | the planted NIS `+` entry, the hash sitting in `/etc/passwd` and the empty password all survive — pressing Enter still authenticates (behavioral, `nullok`) — while the rest still applies |
 | 31 | `--no-exploit-mitigations` | the planted `randomize_va_space=0` survives and no `99-hardening-exploit.conf` drop-in is written, the rest still applies (the scenario restores full ASLR itself: these sysctls are host-global) |
+| 32 | `--no-tmp-confinement` | a binary staged in `/tmp` still executes (the dropper's move must keep working with the step skipped), no `/tmp` entry lands in fstab, the rest still applies |
 
-**Result: 75/75 checks pass.**
+**Result: 78/78 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

@@ -181,6 +181,16 @@
 #      and perf events restricted to root (perf_event_paranoid=3 — the
 #      side-channel listening post). Own drop-in; live writes warn, never
 #      abort (the sysctl-step shape).
+#  40. /tmp confinement (CIS 1.1.2.1): the mount-options step done to the
+#      OTHER world-writable directory every process can reach. /tmp gains
+#      nodev,nosuid,noexec — pinned in fstab, applied live (remount if /tmp
+#      is already a mount, a fresh shadowing tmpfs if it's a plain
+#      directory, the pre-Debian-13 default). The /dev/shm step left /tmp
+#      alone citing "breaks installers"; measured since: apt and dpkg never
+#      execute from /tmp (maintainer scripts run from /var/lib/dpkg), and
+#      the CI proves it by reinstalling a package on the confined node. The
+#      vendor .run bundle that unpacks-and-runs from /tmp does break — that
+#      is what --no-tmp-confinement and TMPDIR are for.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -232,6 +242,7 @@
 #                          unshadowed hashes, empty passwords)
 #   --no-exploit-mitigations skip the exploit-mitigation sysctls (ASLR, kexec,
 #                          unprivileged BPF, JIT hardening, perf events)
+#   --no-tmp-confinement   skip /tmp hardening (nodev,nosuid,noexec + fstab pin)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -283,6 +294,7 @@ DO_LEGACY_PROTOCOLS=1
 DO_FS_PROTECTED=1
 DO_ACCOUNT_HYGIENE=1
 DO_EXPLOIT_MITIGATIONS=1
+DO_TMP_CONFINEMENT=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -364,6 +376,7 @@ parse_args() {
             --no-fs-protected) DO_FS_PROTECTED=0; shift;;
             --no-account-hygiene) DO_ACCOUNT_HYGIENE=0; shift;;
             --no-exploit-mitigations) DO_EXPLOIT_MITIGATIONS=0; shift;;
+            --no-tmp-confinement) DO_TMP_CONFINEMENT=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -699,9 +712,10 @@ setup_mount_options() {
     fi
     # /dev/shm is world-writable by design — any user or compromised service
     # can write there. With exec/suid/dev allowed it's the classic staging
-    # ground for droppers (CIS 1.1.2.2). Only /dev/shm is touched: /tmp is
-    # deliberately left alone because a noexec /tmp breaks well-behaved
-    # installers, and Debian doesn't ship it as a separate mount anyway.
+    # ground for droppers (CIS 1.1.2.2). Only /dev/shm is touched here: /tmp
+    # gets the same treatment in its own step (tmp confinement, step 40) —
+    # this step once left it alone citing "breaks installers", a claim step
+    # 40 revisits with measurement.
 
     # fstab: Debian normally has NO /dev/shm entry (systemd mounts it), so the
     # options must be pinned to survive reboots. If an entry already exists,
@@ -2915,6 +2929,93 @@ EOF
     ok "Fixed addresses, soft-booted kernels and unprivileged BPF are off the table"
 }
 
+# ---- Step 40: /tmp confinement (CIS 1.1.2.1) ---------------------------------
+
+setup_tmp_confinement() {
+    [ "$DO_TMP_CONFINEMENT" -eq 1 ] || { log "Skipping /tmp confinement"; return 0; }
+    log "Confining /tmp (nodev,nosuid,noexec, pinned in fstab)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would pin /tmp in /etc/fstab with nodev,nosuid,noexec and mount (or remount) it live\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # The mount-options step done to the OTHER world-writable directory every
+    # process can reach. That step left /tmp alone with the folk wisdom that
+    # a noexec /tmp "breaks installers" — measured since: apt and dpkg never
+    # execute from /tmp (maintainer scripts run from /var/lib/dpkg, archives
+    # unpack under /var/cache/apt), and the CI proves it by reinstalling a
+    # package on a node whose /tmp is already confined. What noexec /tmp
+    # actually stops is the same dropper story as /dev/shm: stage the payload
+    # in a world-writable directory, run it from there. The genuine casualty
+    # is the vendor .run bundle that unpacks-and-executes from /tmp — that is
+    # what --no-tmp-confinement is for, and TMPDIR redirects the well-behaved
+    # ones anyway.
+    #
+    # Debian 13 already mounts /tmp as tmpfs (systemd's tmp.mount:
+    # nosuid,nodev — but NO noexec); older installs have /tmp as a plain
+    # directory on the root filesystem. Both are handled: an existing mount
+    # is remounted with whatever is missing, a plain directory gets a fresh
+    # tmpfs. A fresh mount SHADOWS existing /tmp content rather than deleting
+    # it (it returns if the mount goes away) — /tmp is ephemeral by contract
+    # and a reboot would have emptied it anyway; processes holding open files
+    # there keep their descriptors.
+
+    # fstab pin: an entry wins over systemd's stock tmp.mount (the fstab
+    # generator turns it into the unit), so the options survive reboots on
+    # both layouts. An existing entry — say /tmp on its own ext4 partition —
+    # only has its options field edited: the filesystem stays whatever it is.
+    if grep -qE '^[^#[:space:]]+[[:space:]]+/tmp[[:space:]]' /etc/fstab; then
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            $1 !~ /^#/ && $2 == "/tmp" {
+                n = split($4, have, ",")
+                for (i = 1; i <= n; i++) seen[have[i]] = 1
+                split("nodev,nosuid,noexec", want, ",")
+                for (i = 1; i <= 3; i++) if (!seen[want[i]]) $4 = $4 "," want[i]
+                delete seen
+                if ($5 == "") $5 = "0"
+                if ($6 == "") $6 = "0"
+                print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6
+                next
+            }
+            { print }
+        ' /etc/fstab > "$tmp"
+        if cmp -s "$tmp" /etc/fstab; then
+            ok "fstab entry for /tmp already has nodev,nosuid,noexec"
+            rm -f "$tmp"
+        else
+            install -m 644 -o root -g root "$tmp" /etc/fstab
+            rm -f "$tmp"
+            ok "Added missing options to the existing /tmp fstab entry"
+        fi
+    else
+        # mode=1777,strictatime matches systemd's tmp.mount; size=50% keeps a
+        # runaway /tmp from eating all the RAM (also the systemd default).
+        printf 'tmpfs\t/tmp\ttmpfs\tmode=1777,strictatime,nodev,nosuid,noexec,size=50%%\t0\t0\n' >> /etc/fstab
+        ok "Pinned /tmp in /etc/fstab with nodev,nosuid,noexec"
+    fi
+
+    # Live, idempotently: remount only if an option is actually missing, and
+    # mount fresh only if /tmp isn't a mountpoint at all.
+    if mountpoint -q /tmp; then
+        local opts o missing=0
+        opts=$(findmnt -no OPTIONS /tmp)
+        for o in nodev nosuid noexec; do
+            case ",$opts," in *",$o,"*) ;; *) missing=1;; esac
+        done
+        if [ "$missing" -eq 1 ]; then
+            run mount -o remount,nodev,nosuid,noexec /tmp
+            ok "Remounted /tmp with nodev,nosuid,noexec"
+        else
+            ok "/tmp already mounted with nodev,nosuid,noexec"
+        fi
+    else
+        run mount -t tmpfs -o mode=1777,strictatime,nodev,nosuid,noexec,size=50% tmpfs /tmp
+        ok "Mounted /tmp as tmpfs with nodev,nosuid,noexec (previous content shadowed, not deleted)"
+    fi
+    ok "The world-writable staging ground is a dead end now: nothing executes from /tmp"
+}
+
 main() {
     require_root
     check_debian
@@ -2959,6 +3060,7 @@ main() {
     [ "$DO_LEGACY_PROTOCOLS" -eq 1 ] && echo "    - legacy protocol purge (telnet/rsh/talk/NIS/tftp/inetd family)"
     [ "$DO_FS_PROTECTED" -eq 1 ] && echo "    - filesystem protections (fs.protected_symlinks/hardlinks/fifos/regular)"
     [ "$DO_EXPLOIT_MITIGATIONS" -eq 1 ] && echo "    - exploit mitigations (full ASLR, no kexec, no unprivileged BPF, blinded JIT, perf root-only)"
+    [ "$DO_TMP_CONFINEMENT" -eq 1 ] && echo "    - /tmp confinement (nodev,nosuid,noexec + fstab pin)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3012,6 +3114,7 @@ main() {
     setup_legacy_protocols
     setup_fs_protected
     setup_exploit_mitigations
+    setup_tmp_confinement
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

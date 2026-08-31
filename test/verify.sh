@@ -1094,6 +1094,29 @@ expect_line "perf events are root-only (perf_event_paranoid = 3)" '^3$' \
 expect_line "the exploit-mitigation drop-in survives reboots" \
   'kernel\.randomize_va_space = 2' sudo cat /etc/sysctl.d/99-hardening-exploit.conf
 
+echo "== Step 40: /tmp confinement =="
+expect_line "fstab pins /tmp with nodev,nosuid,noexec" \
+  "nodev,nosuid,noexec" \
+  grep -E "'^[^#].*[[:space:]]/tmp[[:space:]]'" /etc/fstab
+expect_line "/tmp is live-mounted nodev" ",nodev,|,nodev$|^nodev," findmnt -no OPTIONS /tmp
+expect_line "/tmp is live-mounted nosuid" ",nosuid,|,nosuid$|^nosuid," findmnt -no OPTIONS /tmp
+expect_line "/tmp is live-mounted noexec" ",noexec,|,noexec$|^noexec," findmnt -no OPTIONS /tmp
+# Functional: the dropper's move — stage a binary in the one world-writable
+# directory every process can reach, run it from there. Must die on noexec.
+on_node cp /bin/true /tmp/db-harden-probe 2>/dev/null || true
+if on_node /tmp/db-harden-probe >/dev/null 2>&1; then
+  fail "a binary staged in /tmp cannot execute (noexec enforced)"
+else
+  pass "a binary staged in /tmp cannot execute (noexec enforced)"
+fi
+on_node rm -f /tmp/db-harden-probe 2>/dev/null || true
+# The measurement the step's story rests on: the /dev/shm step once left /tmp
+# alone claiming noexec /tmp "breaks installers". Reinstall a real package —
+# download, unpack, maintainer scripts, the works — on the confined node:
+# apt and dpkg never execute from /tmp, and this proves it every CI run.
+expect_ok "apt still installs packages with /tmp noexec (bsdutils reinstalled)" \
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y bsdutils
+
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
 # few attempts right after a (re)start while it catches up with the journal, so
