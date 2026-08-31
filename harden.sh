@@ -191,6 +191,15 @@
 #      the CI proves it by reinstalling a package on the confined node. The
 #      vendor .run bundle that unpacks-and-runs from /tmp does break — that
 #      is what --no-tmp-confinement and TMPDIR are for.
+#  41. Time synchronization (CIS 2.1): the clock is a security control —
+#      certificate windows, Kerberos lifetimes, TOTP and log correlation
+#      are all comparisons against it, and drift fails them SILENTLY.
+#      systemd-timesyncd installed, servers pinned explicitly in a drop-in
+#      (a commented-out fallback default is not a decision), enabled at
+#      boot. Defers to an admin's chrony/ntpsec (one clock daemon is the
+#      point). In a container systemd itself keeps the unit inactive BY
+#      DESIGN (ConditionVirtualization=!container — the clock belongs to
+#      the host, measured): config-promise split, the auditd precedent.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -243,6 +252,7 @@
 #   --no-exploit-mitigations skip the exploit-mitigation sysctls (ASLR, kexec,
 #                          unprivileged BPF, JIT hardening, perf events)
 #   --no-tmp-confinement   skip /tmp hardening (nodev,nosuid,noexec + fstab pin)
+#   --no-time-sync         skip time synchronization (systemd-timesyncd + drop-in)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -295,6 +305,7 @@ DO_FS_PROTECTED=1
 DO_ACCOUNT_HYGIENE=1
 DO_EXPLOIT_MITIGATIONS=1
 DO_TMP_CONFINEMENT=1
+DO_TIME_SYNC=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -377,6 +388,7 @@ parse_args() {
             --no-account-hygiene) DO_ACCOUNT_HYGIENE=0; shift;;
             --no-exploit-mitigations) DO_EXPLOIT_MITIGATIONS=0; shift;;
             --no-tmp-confinement) DO_TMP_CONFINEMENT=0; shift;;
+            --no-time-sync) DO_TIME_SYNC=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3016,6 +3028,97 @@ setup_tmp_confinement() {
     ok "The world-writable staging ground is a dead end now: nothing executes from /tmp"
 }
 
+# ---- Step 41: time synchronization (CIS 2.1) ---------------------------------
+TIMESYNC_DROPIN=/etc/systemd/timesyncd.conf.d/99-hardening.conf
+
+setup_time_sync() {
+    [ "$DO_TIME_SYNC" -eq 1 ] || { log "Skipping time synchronization"; return 0; }
+    log "Configuring time synchronization (systemd-timesyncd, CIS 2.1)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would install systemd-timesyncd, pin its NTP servers in %s and enable it\n' "$c_yellow" "$c_reset" "$TIMESYNC_DROPIN"
+        return 0
+    fi
+    # The clock is a security control, not a convenience: certificate
+    # validity windows, Kerberos ticket lifetimes and TOTP codes are all
+    # comparisons against it, and a forensic timeline is only a timeline if
+    # every box agrees what time it was. A drifting clock fails all of that
+    # SILENTLY — nothing errors, logins just start failing and logs stop
+    # correlating. CIS 2.1 wants exactly ONE time daemon, configured.
+    #
+    # An admin's chrony/ntpsec is a decision — defer to it, never purge a
+    # working clock daemon out from under a box.
+    local other
+    for other in chrony ntpsec ntp; do
+        if systemctl is-active --quiet "$other" 2>/dev/null \
+           || systemctl is-active --quiet "${other}d" 2>/dev/null; then
+            warn "$other is already keeping time here — leaving it in charge (one clock daemon is the point)"
+            return 0
+        fi
+    done
+    # Debian 13 ships systemd-timesyncd as its own package, and a minimal
+    # install does NOT have it (measured on the node image).
+    if dpkg -s systemd-timesyncd >/dev/null 2>&1; then
+        ok "systemd-timesyncd already installed"
+    else
+        run apt-get install -y systemd-timesyncd
+        ok "Installed systemd-timesyncd"
+    fi
+    # Pin the servers explicitly. The stock config carries them only as
+    # commented-out FallbackNTP defaults — a fallback default is "whatever
+    # this build decided", which is not a decision (the WDigest argument the
+    # Windows sibling makes, applied to the clock). Cross-provider fallback,
+    # so one provider's bad day doesn't stop time.
+    local desired
+    desired=$(cat <<'EOF'
+# Managed by harden.sh (time synchronization step). Edit the script, not this file.
+# The clock is a security control: certificate windows, Kerberos lifetimes,
+# TOTP and log correlation all depend on it. Explicit servers, not fallbacks.
+[Time]
+NTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org
+FallbackNTP=time.cloudflare.com time.google.com
+EOF
+)
+    local changed=0
+    if [ -f "$TIMESYNC_DROPIN" ] && [ "$(cat "$TIMESYNC_DROPIN")" = "$desired" ]; then
+        ok "timesyncd drop-in already in place"
+    else
+        mkdir -p "$(dirname "$TIMESYNC_DROPIN")"
+        printf '%s\n' "$desired" > "$TIMESYNC_DROPIN"
+        chmod 644 "$TIMESYNC_DROPIN"
+        chown root:root "$TIMESYNC_DROPIN"
+        ok "Wrote $TIMESYNC_DROPIN"
+        changed=1
+    fi
+    # The package preset already enables the unit (measured); assert rather
+    # than blindly re-enable, so a second pass stays silent.
+    if [ "$(systemctl is-enabled systemd-timesyncd 2>/dev/null)" = "enabled" ]; then
+        ok "systemd-timesyncd is enabled at boot"
+    else
+        run systemctl enable systemd-timesyncd
+        ok "Enabled systemd-timesyncd at boot"
+    fi
+    # Start (or restart, if the config changed) — and the attempt is safe
+    # everywhere, MEASURED: with an unmet condition systemctl returns 0 and
+    # the unit just stays inactive.
+    if [ "$changed" -eq 1 ]; then
+        run systemctl restart systemd-timesyncd || true
+    else
+        run systemctl start systemd-timesyncd || true
+    fi
+    # The honesty fork, measured while designing this step: timesyncd ships
+    # ConditionVirtualization=!container — inside a container systemd itself
+    # refuses to run it BY DESIGN, because the clock belongs to the host
+    # (there is exactly one kernel clock, and it is not this namespace's to
+    # set). The config is still real work: staged, enabled, and live the
+    # moment this filesystem boots on a real machine. Same promise split as
+    # the auditd step, whose netlink is equally not namespaced.
+    if systemd-detect-virt --container --quiet 2>/dev/null; then
+        warn "container detected — systemd-timesyncd stays inactive here BY DESIGN (ConditionVirtualization=!container: the clock belongs to the host); config staged and enabled for real boots"
+    else
+        ok "systemd-timesyncd running — the box agrees with the world about what time it is"
+    fi
+}
+
 main() {
     require_root
     check_debian
@@ -3061,6 +3164,7 @@ main() {
     [ "$DO_FS_PROTECTED" -eq 1 ] && echo "    - filesystem protections (fs.protected_symlinks/hardlinks/fifos/regular)"
     [ "$DO_EXPLOIT_MITIGATIONS" -eq 1 ] && echo "    - exploit mitigations (full ASLR, no kexec, no unprivileged BPF, blinded JIT, perf root-only)"
     [ "$DO_TMP_CONFINEMENT" -eq 1 ] && echo "    - /tmp confinement (nodev,nosuid,noexec + fstab pin)"
+    [ "$DO_TIME_SYNC" -eq 1 ] && echo "    - time synchronization (systemd-timesyncd, servers pinned, enabled at boot)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3115,6 +3219,7 @@ main() {
     setup_fs_protected
     setup_exploit_mitigations
     setup_tmp_confinement
+    setup_time_sync
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

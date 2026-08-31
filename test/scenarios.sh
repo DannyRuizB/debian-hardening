@@ -527,6 +527,22 @@ got=$(val s32 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s32 >/dev/null 2>&1
 
+echo "-- 33. Skip a step: --no-time-sync --------------------------"
+fresh_node s33
+# The fresh node image has no time-sync daemon (measured) — absence IS the
+# offender, so the skip just has to leave it absent.
+docker exec s33 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-time-sync -y >/dev/null 2>&1
+if docker exec s33 dpkg -s systemd-timesyncd >/dev/null 2>&1; then
+  F "--no-time-sync should not install systemd-timesyncd" "package present"; else
+  P "--no-time-sync -> systemd-timesyncd stays uninstalled"; fi
+if docker exec s33 test -f /etc/systemd/timesyncd.conf.d/99-hardening.conf 2>/dev/null; then
+  F "--no-time-sync should not write the drop-in" "file exists"; else
+  P "--no-time-sync -> no timesyncd drop-in written"; fi
+got=$(val s33 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s33 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
