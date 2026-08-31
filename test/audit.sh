@@ -197,6 +197,30 @@ on_node grep -qE '^[^#].*[[:space:]]/tmp[[:space:]].*nodev' /etc/fstab \
   && P "/tmp options pinned in fstab (survive reboots)" \
   || W "/tmp options not in fstab" "pin 'tmpfs /tmp tmpfs mode=1777,strictatime,nodev,nosuid,noexec,size=50% 0 0'"
 
+echo "-- Time synchronization (CIS 2.1) ----------------------------"
+# One clock daemon, configured: certificate windows, Kerberos lifetimes,
+# TOTP and log correlation are all comparisons against the clock.
+if on_node dpkg -s systemd-timesyncd >/dev/null 2>&1 \
+   || on_node dpkg -s chrony >/dev/null 2>&1 \
+   || on_node dpkg -s ntpsec >/dev/null 2>&1; then
+  P "A time-sync daemon is installed"
+else
+  W "No time-sync daemon installed" "run harden.sh (time-sync step) or install chrony"
+fi
+if [ "$(on_node sudo systemctl is-enabled systemd-timesyncd 2>/dev/null)" = "enabled" ] \
+   || [ "$(on_node sudo systemctl is-enabled chrony 2>/dev/null)" = "enabled" ]; then
+  P "Time synchronization is enabled at boot"
+else
+  W "No time-sync daemon enabled at boot" "systemctl enable systemd-timesyncd (harden.sh time-sync step)"
+fi
+if on_node systemd-detect-virt --container --quiet 2>/dev/null; then
+  P "Container: the host owns the clock (timesyncd inactive by systemd's own condition)"
+elif on_node test -f /run/systemd/timesync/synchronized 2>/dev/null; then
+  P "The clock has synchronized since boot"
+else
+  W "The clock has not synchronized yet" "check outbound udp/123 and systemctl status systemd-timesyncd"
+fi
+
 echo "-- Warning banners (CIS 1.7) --------------------------------"
 [ "$(val banner)" != "none" ] && [ -n "$(val banner)" ] \
   && P "sshd presents a pre-auth banner ($(val banner))" \
