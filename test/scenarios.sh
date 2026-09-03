@@ -560,6 +560,22 @@ got=$(val s34 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s34 >/dev/null 2>&1
 
+echo "-- 35. Skip a step: --no-var-tmp-confinement ----------------"
+fresh_node s35
+# The fresh node has /var/tmp as a plain directory (measured) — absence of
+# the bind IS the offender, so the skip just has to leave it plain.
+docker exec s35 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-var-tmp-confinement -y >/dev/null 2>&1
+if docker exec s35 mountpoint -q /var/tmp 2>/dev/null; then
+  F "--no-var-tmp-confinement should leave /var/tmp a plain directory" "it is a mountpoint"; else
+  P "--no-var-tmp-confinement -> /var/tmp stays a plain directory (no bind)"; fi
+if docker exec s35 bash -c 'cp /bin/true /var/tmp/s35 && /var/tmp/s35' >/dev/null 2>&1; then
+  P "--no-var-tmp-confinement -> a binary in /var/tmp still executes (step skipped)"; else
+  F "--no-var-tmp-confinement should leave /var/tmp executable" "exec refused"; fi
+got=$(val s35 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s35 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

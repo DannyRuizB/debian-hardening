@@ -52,8 +52,9 @@ cd test
 | 32 | `--no-tmp-confinement` | a binary staged in `/tmp` still executes (the dropper's move must keep working with the step skipped), no `/tmp` entry lands in fstab, the rest still applies |
 | 33 | `--no-time-sync` | systemd-timesyncd stays uninstalled (the fresh node image has no time daemon — absence is the offender) and no timesyncd drop-in is written, the rest still applies |
 | 34 | `--no-apt-trust` | a planted `APT::Get::AllowUnauthenticated "true"` stays the *effective* config (`apt-config dump`, apt's merged view) and no `99-hardening-apt-trust` pin is written, the rest still applies |
+| 35 | `--no-var-tmp-confinement` | `/var/tmp` stays a plain directory (no bind mount — the fresh node ships it that way, absence is the offender) and a binary staged there still executes, the rest still applies |
 
-**Result: 84/84 checks pass.**
+**Result: 87/87 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

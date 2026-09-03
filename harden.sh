@@ -212,6 +212,16 @@
 #      workaround someone left in an earlier file (the CI plants one).
 #      Sources marked trusted=yes bypass every gate and are REPORTED, never
 #      edited: a per-source trust override is an explicit admin decision.
+#  43. /var/tmp confinement (CIS 1.1.4.x): the THIRD world-writable
+#      directory, and the one that PERSISTS across reboots — which is why a
+#      dropper that wants to survive one stages there. Debian keeps it as
+#      a plain directory on /, so there is nothing to remount: it is
+#      bind-mounted onto itself and the bind is tightened to
+#      nodev,nosuid,noexec (mount options belong to a mount, not a
+#      directory — the bind gives the directory a mount of its own
+#      without a partition). Same files before and after (it is a bind,
+#      not a tmpfs), pinned in fstab, applied live. The honest equivalent
+#      of the separate partition CIS asks for, on a box without one.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -266,6 +276,7 @@
 #   --no-tmp-confinement   skip /tmp hardening (nodev,nosuid,noexec + fstab pin)
 #   --no-time-sync         skip time synchronization (systemd-timesyncd + drop-in)
 #   --no-apt-trust         skip the apt trust pins (unsigned repos, unauthenticated installs)
+#   --no-var-tmp-confinement skip /var/tmp hardening (bind mount, nodev,nosuid,noexec + fstab pin)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -320,6 +331,7 @@ DO_EXPLOIT_MITIGATIONS=1
 DO_TMP_CONFINEMENT=1
 DO_TIME_SYNC=1
 DO_APT_TRUST=1
+DO_VAR_TMP_CONFINEMENT=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -404,6 +416,7 @@ parse_args() {
             --no-tmp-confinement) DO_TMP_CONFINEMENT=0; shift;;
             --no-time-sync) DO_TIME_SYNC=0; shift;;
             --no-apt-trust) DO_APT_TRUST=0; shift;;
+            --no-var-tmp-confinement) DO_VAR_TMP_CONFINEMENT=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3211,6 +3224,87 @@ EOF
     ok "apt installs only what a key it knows has signed"
 }
 
+# ---- Step 43: /var/tmp confinement (CIS 1.1.4.x) ----------------------------
+setup_var_tmp_confinement() {
+    [ "$DO_VAR_TMP_CONFINEMENT" -eq 1 ] || { log "Skipping /var/tmp confinement"; return 0; }
+    log "Confining /var/tmp (bind mount with nodev,nosuid,noexec, pinned in fstab)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would bind-mount /var/tmp onto itself with nodev,nosuid,noexec and pin the bind in /etc/fstab\n' "$c_yellow" "$c_reset"
+        return 0
+    fi
+    # The THIRD world-writable directory every process can reach (after
+    # /dev/shm and /tmp) — and unlike /tmp it PERSISTS across reboots, which
+    # is exactly why a dropper that wants to survive one stages here. Debian
+    # keeps /var/tmp as a plain directory on the root filesystem, so there is
+    # nothing to remount; the trick is a BIND MOUNT of the directory onto
+    # itself, whose options can then be tightened: mount options belong to a
+    # mount, not to a directory, and a bind gives the directory a mount of
+    # its own without a partition. MEASURED (privileged debian:13): the bind
+    # plus remount lands nodev,nosuid,noexec; a binary staged there dies with
+    # "Permission denied"; a file written before the bind is the SAME file
+    # after it (a bind, not a tmpfs — persistence intact, and the 30-day
+    # systemd-tmpfiles sweep still finds it); and the fstab line
+    # `/var/tmp /var/tmp none bind,nodev,nosuid,noexec 0 0` applies all of it
+    # in one go at boot. CIS 1.1.4.1 asks for a separate partition; the bind
+    # is the honest equivalent on a box without one, with the same
+    # nodev,nosuid,noexec result (1.1.4.2-4). One trap measured: `mount -a`
+    # on top of a manual bind STACKS a second mount on the same target, so
+    # mount only when /var/tmp is not a mountpoint yet and remount only when
+    # an option is actually missing.
+    if grep -qE '^[^#[:space:]]+[[:space:]]+/var/tmp[[:space:]]' /etc/fstab; then
+        # An existing entry — a real partition, or a bind someone already
+        # made — only has its options field completed.
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            $1 !~ /^#/ && $2 == "/var/tmp" {
+                n = split($4, have, ",")
+                for (i = 1; i <= n; i++) seen[have[i]] = 1
+                split("nodev,nosuid,noexec", want, ",")
+                for (i = 1; i <= 3; i++) if (!seen[want[i]]) $4 = $4 "," want[i]
+                delete seen
+                if ($5 == "") $5 = "0"
+                if ($6 == "") $6 = "0"
+                print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6
+                next
+            }
+            { print }
+        ' /etc/fstab > "$tmp"
+        if cmp -s "$tmp" /etc/fstab; then
+            ok "fstab entry for /var/tmp already has nodev,nosuid,noexec"
+            rm -f "$tmp"
+        else
+            install -m 644 -o root -g root "$tmp" /etc/fstab
+            rm -f "$tmp"
+            ok "Added missing options to the existing /var/tmp fstab entry"
+        fi
+    else
+        printf '/var/tmp\t/var/tmp\tnone\tbind,nodev,nosuid,noexec\t0\t0\n' >> /etc/fstab
+        ok "Pinned the /var/tmp bind mount in /etc/fstab with nodev,nosuid,noexec"
+    fi
+
+    if mountpoint -q /var/tmp; then
+        local opts o missing=0
+        opts=$(findmnt -no OPTIONS /var/tmp)
+        for o in nodev nosuid noexec; do
+            case ",$opts," in *",$o,"*) ;; *) missing=1;; esac
+        done
+        if [ "$missing" -eq 1 ]; then
+            # remount,bind edits the flags of THIS mountpoint (bind or not)
+            # without touching the filesystem underneath.
+            run mount -o remount,bind,nodev,nosuid,noexec /var/tmp
+            ok "Remounted /var/tmp with nodev,nosuid,noexec"
+        else
+            ok "/var/tmp already mounted with nodev,nosuid,noexec"
+        fi
+    else
+        run mount --bind /var/tmp /var/tmp
+        run mount -o remount,bind,nodev,nosuid,noexec /var/tmp
+        ok "Bind-mounted /var/tmp onto itself with nodev,nosuid,noexec (same files, now a mount of their own)"
+    fi
+    ok "The persistent staging ground is a dead end too: nothing executes from /var/tmp"
+}
+
 main() {
     require_root
     check_debian
@@ -3258,6 +3352,7 @@ main() {
     [ "$DO_TMP_CONFINEMENT" -eq 1 ] && echo "    - /tmp confinement (nodev,nosuid,noexec + fstab pin)"
     [ "$DO_TIME_SYNC" -eq 1 ] && echo "    - time synchronization (systemd-timesyncd, servers pinned, enabled at boot)"
     [ "$DO_APT_TRUST" -eq 1 ] && echo "    - apt source trust (no unsigned repos, no unauthenticated installs — pinned in apt.conf.d)"
+    [ "$DO_VAR_TMP_CONFINEMENT" -eq 1 ] && echo "    - /var/tmp confinement (bind mount with nodev,nosuid,noexec + fstab pin)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3314,6 +3409,7 @@ main() {
     setup_tmp_confinement
     setup_time_sync
     setup_apt_trust
+    setup_var_tmp_confinement
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
