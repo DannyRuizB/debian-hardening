@@ -200,6 +200,18 @@
 #      point). In a container systemd itself keeps the unit inactive BY
 #      DESIGN (ConditionVirtualization=!container — the clock belongs to
 #      the host, measured): config-promise split, the auditd precedent.
+#  42. Apt source trust (CIS 1.2): the package manager is the one channel
+#      that installs root-owned code BY DESIGN, and apt's signature check is
+#      what makes it a channel and not a hole. Its two trust gates are
+#      pinned strict in their own drop-in — no unsigned repositories
+#      (the INDEX gate), no unauthenticated installs (the INSTALL gate) —
+#      plus no downgrade to insecure, no weak (sha1-only) repositories and
+#      expired Release files refused (the freeze attack). The defaults are
+#      already strict; the point is PRECEDENCE: apt.conf.d is read in order
+#      and the LAST setting wins, so the pin overrides the broken-mirror
+#      workaround someone left in an earlier file (the CI plants one).
+#      Sources marked trusted=yes bypass every gate and are REPORTED, never
+#      edited: a per-source trust override is an explicit admin decision.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -253,6 +265,7 @@
 #                          unprivileged BPF, JIT hardening, perf events)
 #   --no-tmp-confinement   skip /tmp hardening (nodev,nosuid,noexec + fstab pin)
 #   --no-time-sync         skip time synchronization (systemd-timesyncd + drop-in)
+#   --no-apt-trust         skip the apt trust pins (unsigned repos, unauthenticated installs)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -306,6 +319,7 @@ DO_ACCOUNT_HYGIENE=1
 DO_EXPLOIT_MITIGATIONS=1
 DO_TMP_CONFINEMENT=1
 DO_TIME_SYNC=1
+DO_APT_TRUST=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -389,6 +403,7 @@ parse_args() {
             --no-exploit-mitigations) DO_EXPLOIT_MITIGATIONS=0; shift;;
             --no-tmp-confinement) DO_TMP_CONFINEMENT=0; shift;;
             --no-time-sync) DO_TIME_SYNC=0; shift;;
+            --no-apt-trust) DO_APT_TRUST=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3119,6 +3134,83 @@ EOF
     fi
 }
 
+# ---- Step 42: apt source trust (CIS 1.2) -------------------------------------
+APT_TRUST_DROPIN=/etc/apt/apt.conf.d/99-hardening-apt-trust
+
+setup_apt_trust() {
+    [ "$DO_APT_TRUST" -eq 1 ] || { log "Skipping apt source trust"; return 0; }
+    log "Pinning apt's trust gates (no unsigned repositories, no unauthenticated installs — CIS 1.2)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s pinning the apt trust gates strict (insecure repos, unauthenticated installs, downgrade, weak hashes, expired Release)\n' "$c_yellow" "$c_reset" "$APT_TRUST_DROPIN"
+        return 0
+    fi
+    # The package manager is the one channel that installs root-owned code
+    # BY DESIGN — and apt's signature check is what makes it a channel and
+    # not a hole. Two gates, both MEASURED on a stock Debian 13 node against
+    # a local repository with no Release file:
+    #   - Acquire::AllowInsecureRepositories gates the INDEX: stock apt
+    #     refuses the repo at `apt-get update` (rc 100, "does not have a
+    #     Release file"); set to true — the classic broken-mirror
+    #     workaround — the index is fetched behind a one-line warning.
+    #   - APT::Get::AllowUnauthenticated gates the INSTALL: stock apt refuses
+    #     ("There were unauthenticated packages and -y was used"); set to
+    #     true, the package installs with "Authentication warning
+    #     overridden". This gate also covers an index that was fetched while
+    #     the first one was open: a stale insecure list outlives a fixed
+    #     config, and only the install gate stands between it and dpkg.
+    #   Both true = unauthenticated code installs behind a warning nobody
+    #   reads. The defaults ARE strict; the point of pinning them is
+    #   PRECEDENCE: apt.conf.d is read in lexical order and the LAST setting
+    #   wins, so a 99-* drop-in overrides a loosening left in any earlier
+    #   file (measured: the weak file stays, `apt-config dump` shows false).
+    # Check-Valid-Until refuses an EXPIRED Release file — the freeze attack,
+    # where a mirror serves a stale but validly-signed snapshot to keep a
+    # known-vulnerable version installable. AllowWeakRepositories covers the
+    # sha1-only Release; AllowDowngradeToInsecureRepositories the mirror that
+    # was signed yesterday and isn't today.
+    local desired
+    desired=$(cat <<'EOF'
+// Managed by harden.sh (apt source trust step). Edit the script, not this file.
+// apt.conf.d is read in lexical order and the LAST setting wins: this file
+// pins the trust gates strict over anything loosened in an earlier file.
+Acquire::AllowInsecureRepositories "false";
+Acquire::AllowDowngradeToInsecureRepositories "false";
+Acquire::AllowWeakRepositories "false";
+APT::Get::AllowUnauthenticated "false";
+Acquire::Check-Valid-Until "true";
+EOF
+)
+    if [ -f "$APT_TRUST_DROPIN" ] && [ "$(cat "$APT_TRUST_DROPIN")" = "$desired" ]; then
+        ok "apt trust drop-in already in place"
+    else
+        printf '%s\n' "$desired" > "$APT_TRUST_DROPIN"
+        chmod 644 "$APT_TRUST_DROPIN"
+        chown root:root "$APT_TRUST_DROPIN"
+        ok "Wrote $APT_TRUST_DROPIN"
+    fi
+    # Report, never edit. A loosening in ANOTHER conf file is overridden by
+    # the pin above (unless it sorts after 99-hardening — rare, and named
+    # here so it is not silent); a trusted=yes source is a per-source admin
+    # decision that BYPASSES every gate above (measured: the repo with no
+    # Release file installs silently under [trusted=yes], pins and all).
+    local loose trusted
+    loose=$(grep -rlsiE '(AllowInsecureRepositories|AllowUnauthenticated|AllowDowngradeToInsecureRepositories|AllowWeakRepositories)[[:space:]]+"?(true|1|yes)' \
+        /etc/apt/apt.conf /etc/apt/apt.conf.d/ 2>/dev/null | grep -vx "$APT_TRUST_DROPIN" || true)
+    if [ -n "$loose" ]; then
+        warn "apt trust gates loosened elsewhere — overridden by the pin, but somebody meant it, review: $(echo "$loose" | tr '\n' ' ')"
+    else
+        ok "No other apt.conf file loosens the trust gates"
+    fi
+    trusted=$(grep -rlsE '^[[:space:]]*deb[^#]*\[[^]]*trusted=yes|^[[:space:]]*Trusted:[[:space:]]*yes' \
+        /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true)
+    if [ -n "$trusted" ]; then
+        warn "sources marked trusted=yes bypass every gate above — an explicit admin decision, left alone, review: $(echo "$trusted" | tr '\n' ' ')"
+    else
+        ok "No source is marked trusted=yes"
+    fi
+    ok "apt installs only what a key it knows has signed"
+}
+
 main() {
     require_root
     check_debian
@@ -3165,6 +3257,7 @@ main() {
     [ "$DO_EXPLOIT_MITIGATIONS" -eq 1 ] && echo "    - exploit mitigations (full ASLR, no kexec, no unprivileged BPF, blinded JIT, perf root-only)"
     [ "$DO_TMP_CONFINEMENT" -eq 1 ] && echo "    - /tmp confinement (nodev,nosuid,noexec + fstab pin)"
     [ "$DO_TIME_SYNC" -eq 1 ] && echo "    - time synchronization (systemd-timesyncd, servers pinned, enabled at boot)"
+    [ "$DO_APT_TRUST" -eq 1 ] && echo "    - apt source trust (no unsigned repos, no unauthenticated installs — pinned in apt.conf.d)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3220,6 +3313,7 @@ main() {
     setup_exploit_mitigations
     setup_tmp_confinement
     setup_time_sync
+    setup_apt_trust
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

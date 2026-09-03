@@ -543,6 +543,23 @@ got=$(val s33 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s33 >/dev/null 2>&1
 
+echo "-- 34. Skip a step: --no-apt-trust --------------------------"
+fresh_node s34
+# Plant the broken-mirror workaround: with the step skipped it must stay the
+# EFFECTIVE config (apt-config dump is apt's merged view), and no pin lands.
+docker exec s34 bash -c 'printf "APT::Get::AllowUnauthenticated \"true\";\n" > /etc/apt/apt.conf.d/90-weak'
+docker exec s34 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-apt-trust -y >/dev/null 2>&1
+if docker exec s34 test -f /etc/apt/apt.conf.d/99-hardening-apt-trust 2>/dev/null; then
+  F "--no-apt-trust should not write the trust drop-in" "file exists"; else
+  P "--no-apt-trust -> no apt trust drop-in written"; fi
+got=$(docker exec s34 apt-config dump 2>/dev/null | awk '$1=="APT::Get::AllowUnauthenticated"{gsub(/[";]/,"",$2); print $2; exit}')
+[ "$got" = "true" ] && P "--no-apt-trust -> the planted AllowUnauthenticated=true stays effective (step skipped)" \
+                    || F "--no-apt-trust should leave the planted loosening effective" "got '$got'"
+got=$(val s34 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s34 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
