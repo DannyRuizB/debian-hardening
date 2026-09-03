@@ -222,6 +222,16 @@
 #      without a partition). Same files before and after (it is a bind,
 #      not a tmpfs), pinned in fstab, applied live. The honest equivalent
 #      of the separate partition CIS asks for, on a box without one.
+#  44. Attack-surface services (CIS 2.2): the network daemons a server
+#      runs because a package pulled them in, not because anyone asked —
+#      avahi (mDNS, answers "who is here?" to the whole LAN), CUPS (a
+#      print server on a box that never prints; the Linux side of the
+#      PrintNightmare story) and rpcbind (the portmapper, NFS/NIS
+#      bootstrap and a classic reflector) — PURGED. Measured trap: purging
+#      `cups` alone leaves cups-daemon (the actual cupsd) installed, so
+#      the daemon packages are named explicitly. Every other CIS 2.2
+#      server package (samba, nfs, bind, dhcp, ftp, snmp, squid, mail) is
+#      REPORTED by the audit, never removed: those are business decisions.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -277,6 +287,7 @@
 #   --no-time-sync         skip time synchronization (systemd-timesyncd + drop-in)
 #   --no-apt-trust         skip the apt trust pins (unsigned repos, unauthenticated installs)
 #   --no-var-tmp-confinement skip /var/tmp hardening (bind mount, nodev,nosuid,noexec + fstab pin)
+#   --no-service-purge     skip purging avahi-daemon, cups(-daemon/-browsed) and rpcbind
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -332,6 +343,7 @@ DO_TMP_CONFINEMENT=1
 DO_TIME_SYNC=1
 DO_APT_TRUST=1
 DO_VAR_TMP_CONFINEMENT=1
+DO_SERVICE_PURGE=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -417,6 +429,7 @@ parse_args() {
             --no-time-sync) DO_TIME_SYNC=0; shift;;
             --no-apt-trust) DO_APT_TRUST=0; shift;;
             --no-var-tmp-confinement) DO_VAR_TMP_CONFINEMENT=0; shift;;
+            --no-service-purge) DO_SERVICE_PURGE=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3305,6 +3318,57 @@ setup_var_tmp_confinement() {
     ok "The persistent staging ground is a dead end too: nothing executes from /var/tmp"
 }
 
+# ---- Step 44: attack-surface services (CIS 2.2) ------------------------------
+# The daemon packages, not just the metapackages: MEASURED on debian:13 that
+# `apt-get purge cups` removes the `cups` metapackage and leaves cups-daemon
+# (the actual cupsd) installed and running. Every name here exists in the
+# archive (an unknown name makes apt-get exit 100 — the step-36 lesson), and
+# purging a known-but-absent package is a quiet rc 0.
+SERVICE_PURGE_PACKAGES="avahi-daemon cups cups-daemon cups-browsed rpcbind"
+
+setup_service_purge() {
+    [ "$DO_SERVICE_PURGE" -eq 1 ] || { log "Skipping attack-surface service purge"; return 0; }
+    log "Purging attack-surface services (avahi-daemon, cups, rpcbind — CIS 2.2)"
+    # Three daemons a server ends up running because a package pulled them in,
+    # not because anyone asked — each a network listener with a history:
+    #   - avahi-daemon (mDNS/DNS-SD, udp/5353): announces the box and answers
+    #     "who is here?" to the whole broadcast domain — service discovery is
+    #     reconnaissance done for the attacker, and mDNS is a spoofing vector
+    #     (the Linux twin of the LLMNR step in the Windows sibling).
+    #   - cups (ipp, tcp/631): a print server on a box that never prints, run
+    #     as root with a filter/driver parser exposed to the network — the
+    #     Linux side of the PrintNightmare story (CVE-2024-47176 and friends).
+    #   - rpcbind (portmapper, tcp+udp/111): the bootstrap for NFS/NIS that
+    #     maps program numbers to ports for anyone who asks, and a classic
+    #     UDP reflector.
+    # The other CIS 2.2 server packages (samba, nfs-kernel-server, bind9,
+    # isc-dhcp-server, ftp, snmpd, squid, mail) are business decisions: the
+    # audit REPORTS them, this step never removes them.
+    local installed=() p
+    for p in $SERVICE_PURGE_PACKAGES; do
+        if dpkg -s "$p" >/dev/null 2>&1; then installed+=("$p"); fi
+    done
+    if [ "${#installed[@]}" -eq 0 ]; then
+        ok "None of the attack-surface packages is installed (avahi-daemon, cups, cups-daemon, cups-browsed, rpcbind)"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would purge: %s\n' "$c_yellow" "$c_reset" "${installed[*]}"
+        return 0
+    fi
+    # Stop first so the listener is gone even before dpkg finishes (and so
+    # the purge never has to wait on a busy daemon). Failures here are fine:
+    # a unit that was never started is not an error.
+    for p in "${installed[@]}"; do
+        systemctl stop "$p" 2>/dev/null || true
+        systemctl disable "$p" 2>/dev/null || true
+    done
+    systemctl stop avahi-daemon.socket cups.socket cups.path rpcbind.socket 2>/dev/null || true
+    run env DEBIAN_FRONTEND=noninteractive apt-get purge -y "${installed[@]}"
+    ok "Purged: ${installed[*]}"
+    ok "The box no longer announces itself, prints for strangers or maps ports for anyone who asks"
+}
+
 main() {
     require_root
     check_debian
@@ -3353,6 +3417,7 @@ main() {
     [ "$DO_TIME_SYNC" -eq 1 ] && echo "    - time synchronization (systemd-timesyncd, servers pinned, enabled at boot)"
     [ "$DO_APT_TRUST" -eq 1 ] && echo "    - apt source trust (no unsigned repos, no unauthenticated installs — pinned in apt.conf.d)"
     [ "$DO_VAR_TMP_CONFINEMENT" -eq 1 ] && echo "    - /var/tmp confinement (bind mount with nodev,nosuid,noexec + fstab pin)"
+    [ "$DO_SERVICE_PURGE" -eq 1 ] && echo "    - attack-surface services purged (avahi-daemon, cups + cups-daemon/-browsed, rpcbind)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3410,6 +3475,7 @@ main() {
     setup_time_sync
     setup_apt_trust
     setup_var_tmp_confinement
+    setup_service_purge
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

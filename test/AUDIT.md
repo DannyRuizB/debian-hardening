@@ -96,7 +96,7 @@ actually promises — whatever the most recent step happens to be. Current
 score on a freshly hardened node:
 
 ```
- Score: 143 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 147 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty

@@ -221,6 +221,21 @@ jobs:
       # it (apt.conf.d is read in order, last setting wins) and verify reads
       # the EFFECTIVE config — this plant is what makes that check a proof
       # instead of a restatement of the defaults.
+      # Step 44 offenders — the network daemons a server runs because a
+      # package pulled them in. The node image ships none of them, so install
+      # the three (cups brings cups-daemon, the actual cupsd, with it — the
+      # measured trap: purging `cups` alone leaves it behind). Listeners are
+      # logged before the step so verify's "nothing on 5353/631/111" means
+      # something.
+      - name: Plant attack-surface services for step 44 to purge
+        run: |
+          docker exec db-harden-node bash -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get install -y -qq --no-install-recommends avahi-daemon cups rpcbind >/dev/null 2>&1
+            systemctl start avahi-daemon rpcbind cups 2>/dev/null || true
+            dpkg -l avahi-daemon cups cups-daemon rpcbind | awk "/^ii/{print \$2}" | tr "\n" " "; echo
+            ss -lntu | grep -E ":(5353|631|111)[[:space:]]" || echo "(no listener yet - units may need a moment)"'
+
       - name: Plant loosened apt trust gates for step 42 to override
         run: |
           docker exec db-harden-node bash -c '
