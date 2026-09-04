@@ -612,6 +612,22 @@ got=$(val s37 permitrootlogin)
 docker exec s37 bash -c "echo '${sysrq_was:-0}' > /proc/sys/kernel/sysrq" >/dev/null 2>&1
 docker rm -f s37 >/dev/null 2>&1
 
+echo "-- 38. Skip a step: --no-suid-diet ---------------------------"
+fresh_node s38
+# The fresh node ships chfn setuid root (4755, passwd package): with the step
+# skipped the bit must survive and no statoverride may appear.
+docker exec s38 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-suid-diet -y >/dev/null 2>&1
+got=$(docker exec s38 stat -c %a /usr/bin/chfn 2>/dev/null)
+[ "$got" = 4755 ] && P "--no-suid-diet -> chfn keeps its setuid bit (4755, step skipped)" \
+                  || F "--no-suid-diet should leave chfn alone" "$got"
+if docker exec s38 dpkg-statoverride --list /usr/bin/chfn >/dev/null 2>&1; then
+  F "--no-suid-diet should not write a statoverride" "override present"; else
+  P "--no-suid-diet -> no dpkg-statoverride pin written"; fi
+got=$(val s38 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s38 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \

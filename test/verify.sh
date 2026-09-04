@@ -1291,6 +1291,24 @@ fi
 expect_line "the kernel-surface drop-in survives reboots" \
   'kernel\.io_uring_disabled = 2' sudo cat /etc/sysctl.d/99-hardening-kernel-surface.conf
 
+echo "== Step 46: SUID diet =="
+# The node ships all five setuid/setgid (the passwd and login packages), so
+# each mode below flips red-to-green from real work.
+for f in /usr/bin/chfn /usr/bin/chsh /usr/bin/gpasswd /usr/bin/newgrp /usr/bin/expiry; do
+  expect_line "$(basename "$f") carries no setuid/setgid bit" '^755$' stat -c %a "$f"
+done
+expect_line "the five are pinned in dpkg-statoverride (the bit cannot come back with an upgrade)" '^5$' \
+  bash -c "'dpkg-statoverride --list | grep -cE \" 755 /usr/bin/(chfn|chsh|gpasswd|newgrp|expiry)\$\"'"
+# Behavioural: gpasswd from the admin account now runs as the caller - it
+# cannot even open /etc/gshadow (measured; with the bit it authenticated and
+# said "Permission denied", a root process declining politely).
+expect_line "gpasswd runs as the caller now (cannot open /etc/gshadow)" 'cannot open /etc/gshadow' \
+  bash -c "'gpasswd -a opsadmin opsadmin 2>&1 </dev/null || true'"
+# The trap made a test: reinstall the package that owns chfn - a bare chmod
+# would be undone here (measured: 755 -> 4755); the statoverride holds.
+expect_ok "reinstalling the passwd package leaves chfn at 755 (dpkg honours the override, a chmod would be gone)" \
+  bash -c "'sudo DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y passwd >/dev/null 2>&1 && [ \"\$(stat -c %a /usr/bin/chfn)\" = 755 ]'"
+
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
 # few attempts right after a (re)start while it catches up with the journal, so

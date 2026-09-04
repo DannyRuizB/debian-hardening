@@ -55,8 +55,9 @@ cd test
 | 35 | `--no-var-tmp-confinement` | `/var/tmp` stays a plain directory (no bind mount — the fresh node ships it that way, absence is the offender) and a binary staged there still executes, the rest still applies |
 | 36 | `--no-service-purge` | a planted `rpcbind` survives the run (the fresh node image ships none of the three, so one is installed first), the rest still applies |
 | 37 | `--no-kernel-surface` | a planted `kernel.sysrq=438` (Debian's default, the hotkeys fully open) survives the run and no kernel-surface drop-in is written, the rest still applies — host-global in a privileged container, so the scenario restores the mask it found |
+| 38 | `--no-suid-diet` | `chfn` keeps its shipped setuid bit (4755) and no `dpkg-statoverride` pin appears, the rest still applies |
 
-**Result: 92/92 checks pass.**
+**Result: 95/95 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
