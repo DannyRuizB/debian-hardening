@@ -1309,6 +1309,28 @@ expect_line "gpasswd runs as the caller now (cannot open /etc/gshadow)" 'cannot 
 expect_ok "reinstalling the passwd package leaves chfn at 755 (dpkg honours the override, a chmod would be gone)" \
   bash -c "'sudo DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y passwd >/dev/null 2>&1 && [ \"\$(stat -c %a /usr/bin/chfn)\" = 755 ]'"
 
+echo "== Step 47: per-session process limits =="
+# Debian ships every session unlimited (natural offender, nothing to plant), so
+# the effective values below - read inside a real SSH session of the admin
+# account, the door a compromised account would use - flip from real work.
+expect_line "the limits.d drop-in caps nproc for every session" '^\*\s+hard\s+nproc\s+4096$' \
+  sudo cat /etc/security/limits.d/99-hardening-nproc.conf
+expect_line "the admin session's hard process limit is 4096 (effective, via pam_limits in sshd)" '^4096$' \
+  bash -c "'ulimit -Hu'"
+expect_line "the admin session's soft process limit is 4096 (effective)" '^4096$' \
+  bash -c "'ulimit -Su'"
+# Behavioural: the cap is a HARD limit - the session cannot raise it (a soft
+# limit alone is a suggestion the fork bomb's shell can undo).
+expect_line "the session cannot raise its own cap (ulimit -u 8192 -> Operation not permitted)" 'Operation not permitted' \
+  bash -c "'ulimit -u 8192 2>&1 || true'"
+# Root is not the threat model and '*' never matches it: a sudo shell keeps
+# an unlimited process budget (measured), so an emergency as root is not
+# throttled by this step.
+expect_line "root stays unlimited (sudo shell: ulimit -Hu)" '^unlimited$' \
+  sudo bash -c "'ulimit -Hu'"
+expect_ok "pam_limits sits in the sshd PAM stack (the cap actually applies at the door)" \
+  grep -qE "'^\s*session\s+required\s+pam_limits\.so'" /etc/pam.d/sshd
+
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
 # few attempts right after a (re)start while it catches up with the journal, so
