@@ -3467,7 +3467,11 @@ EOF
 # poke at. Reported, never touched: su, sudo, passwd, mount, umount,
 # ssh-keysign, ssh-agent, unix_chkpwd, chage.
 SUID_DIET_BINARIES="/usr/bin/chfn /usr/bin/chsh /usr/bin/gpasswd /usr/bin/newgrp /usr/bin/expiry"
-SUID_KNOWN_ROOT="/usr/bin/su /usr/bin/sudo /usr/bin/passwd /usr/bin/mount /usr/bin/umount /usr/lib/openssh/ssh-keysign"
+# Two more arrive with legitimate packages on the hardened node (measured):
+# exim4 (Debian's default MTA, pulled in by rkhunter/aide for their mail
+# reports - setuid root is how an MTA delivers) and the D-Bus system
+# activation helper. Known, so the report stays about newcomers.
+SUID_KNOWN_ROOT="/usr/bin/su /usr/bin/sudo /usr/bin/passwd /usr/bin/mount /usr/bin/umount /usr/lib/openssh/ssh-keysign /usr/sbin/exim4 /usr/lib/dbus-1.0/dbus-daemon-launch-helper"
 
 setup_suid_diet() {
     [ "$DO_SUID_DIET" -eq 1 ] || { log "Skipping the SUID diet"; return 0; }
@@ -3531,7 +3535,7 @@ setup_suid_diet() {
     if [ -n "$unknown" ]; then
         warn "setuid-root binaries outside the known list (review each):$unknown"
     else
-        ok "every remaining setuid-root binary is on the known list (su, sudo, passwd, mount, umount, ssh-keysign)"
+        ok "every remaining setuid-root binary is on the known list (su, sudo, passwd, mount, umount, ssh-keysign, exim4, dbus helper)"
     fi
 }
 

@@ -280,13 +280,13 @@ pinned=$(on_node dpkg-statoverride --list 2>/dev/null | grep -cE " 755 /usr/bin/
   || W "only ${pinned:-0}/5 pinned in dpkg-statoverride - a bare chmod is undone by the next upgrade (measured)" "run harden.sh (suid-diet step)"
 unknown_suid=""
 for f in $(on_node "find / -xdev -type f -perm -4000 -user root 2>/dev/null | sort"); do
-  case " /usr/bin/su /usr/bin/sudo /usr/bin/passwd /usr/bin/mount /usr/bin/umount /usr/lib/openssh/ssh-keysign " in
+  case " /usr/bin/su /usr/bin/sudo /usr/bin/passwd /usr/bin/mount /usr/bin/umount /usr/lib/openssh/ssh-keysign /usr/sbin/exim4 /usr/lib/dbus-1.0/dbus-daemon-launch-helper " in
     *" $f "*) ;;
     *) unknown_suid="$unknown_suid $f";;
   esac
 done
 [ -z "$unknown_suid" ] \
-  && P "every remaining setuid-root binary is on the known list (su, sudo, passwd, mount, umount, ssh-keysign)" \
+  && P "every remaining setuid-root binary is on the known list (su, sudo, passwd, mount, umount, ssh-keysign, exim4, dbus helper)" \
   || W "setuid-root binaries outside the known list:$unknown_suid" "each is a privilege boundary - confirm it is meant to be here (CIS 6.1.13)"
 
 echo "-- Time synchronization (CIS 2.1) ----------------------------"
