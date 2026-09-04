@@ -591,6 +591,27 @@ got=$(val s36 permitrootlogin)
 docker rm -f s36 >/dev/null 2>&1
 
 echo "============================================================="
+echo "-- 37. Skip a step: --no-kernel-surface ---------------------"
+fresh_node s37
+# Plant SysRq fully open (Debian's 438), then skip the step: it must stay
+# 438 (no other step touches it) while the rest applies. HOST-GLOBAL in a
+# privileged container, like scenario 31 — so the scenario puts the mask
+# back where it found it at the end.
+sysrq_was=$(docker exec s37 cat /proc/sys/kernel/sysrq 2>/dev/null)
+docker exec s37 bash -c 'echo 438 > /proc/sys/kernel/sysrq' >/dev/null 2>&1
+docker exec s37 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-kernel-surface -y >/dev/null 2>&1
+got=$(docker exec s37 cat /proc/sys/kernel/sysrq 2>/dev/null)
+[ "$got" = 438 ] && P "--no-kernel-surface -> the planted kernel.sysrq=438 survives (step skipped)" \
+                 || F "--no-kernel-surface should leave SysRq alone" "$got"
+if docker exec s37 test -f /etc/sysctl.d/99-hardening-kernel-surface.conf 2>/dev/null; then
+  F "--no-kernel-surface should not write the drop-in" "file exists"; else
+  P "--no-kernel-surface -> no kernel-surface drop-in written"; fi
+got=$(val s37 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker exec s37 bash -c "echo '${sysrq_was:-0}' > /proc/sys/kernel/sysrq" >/dev/null 2>&1
+docker rm -f s37 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
