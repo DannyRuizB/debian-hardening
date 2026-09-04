@@ -290,6 +290,8 @@
 #   --no-service-purge     skip purging avahi-daemon, cups(-daemon/-browsed) and rpcbind
 #   --no-kernel-surface    skip the kernel attack-surface sysctls (io_uring, SysRq,
 #                          tty ldisc autoload, unprivileged user namespaces)
+#   --no-suid-diet         skip stripping setuid/setgid from chfn, chsh, gpasswd,
+#                          newgrp and expiry (pinned with dpkg-statoverride)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -347,6 +349,7 @@ DO_APT_TRUST=1
 DO_VAR_TMP_CONFINEMENT=1
 DO_SERVICE_PURGE=1
 DO_KERNEL_SURFACE=1
+DO_SUID_DIET=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -434,6 +437,7 @@ parse_args() {
             --no-var-tmp-confinement) DO_VAR_TMP_CONFINEMENT=0; shift;;
             --no-service-purge) DO_SERVICE_PURGE=0; shift;;
             --no-kernel-surface) DO_KERNEL_SURFACE=0; shift;;
+            --no-suid-diet) DO_SUID_DIET=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3457,6 +3461,84 @@ EOF
     fi
 }
 
+# ---- Step 46: SUID diet (CIS 6.1.13) -----------------------------------------
+# The identity self-service tools a key-only headless server never needs, yet
+# ships setuid/setgid: each one is a privilege boundary any local account can
+# poke at. Reported, never touched: su, sudo, passwd, mount, umount,
+# ssh-keysign, ssh-agent, unix_chkpwd, chage.
+SUID_DIET_BINARIES="/usr/bin/chfn /usr/bin/chsh /usr/bin/gpasswd /usr/bin/newgrp /usr/bin/expiry"
+# Two more arrive with legitimate packages on the hardened node (measured):
+# exim4 (Debian's default MTA, pulled in by rkhunter/aide for their mail
+# reports - setuid root is how an MTA delivers) and the D-Bus system
+# activation helper. Known, so the report stays about newcomers.
+SUID_KNOWN_ROOT="/usr/bin/su /usr/bin/sudo /usr/bin/passwd /usr/bin/mount /usr/bin/umount /usr/lib/openssh/ssh-keysign /usr/sbin/exim4 /usr/lib/dbus-1.0/dbus-daemon-launch-helper"
+
+setup_suid_diet() {
+    [ "$DO_SUID_DIET" -eq 1 ] || { log "Skipping the SUID diet"; return 0; }
+    log "Stripping setuid/setgid from the identity tools nobody on this box needs (chfn, chsh, gpasswd, newgrp, expiry)"
+    # A setuid-root binary is code that runs as root on behalf of ANY local
+    # account - the classic local-privilege-escalation surface (CIS 6.1.13
+    # says audit them; a headless server can do better). Step 19 inventoried
+    # them; this step removes the bit from the five that exist for a human at
+    # a terminal changing their own finger info, shell or supplementary group:
+    #   chfn, chsh   (setuid root, passwd package)  - edit /etc/passwd fields
+    #   gpasswd      (setuid root, passwd package)  - group administration
+    #   newgrp       (setuid root, login package)   - switch primary group
+    #   expiry       (setgid shadow, passwd)        - read one's own aging
+    # Key-only SSH, no interactive users, shells set by the admin: none of
+    # them has a job here. su/sudo/passwd/mount/umount/ssh-keysign stay -
+    # each is load-bearing - and the audit reports the whole SUID set against
+    # that known list, so a newcomer shows up.
+    # THE TRAP, measured on debian:13: `chmod u-s /usr/bin/chfn` lasts until
+    # the next `apt-get install --reinstall passwd` (mode back to 4755, no
+    # warning). dpkg-statoverride is the mechanism dpkg itself honours: the
+    # override survived the reinstall (still 755). It is also fussy - a second
+    # `--add` for an existing path aborts (rc 2), so an existing override with
+    # another mode is removed first, and the same mode is left alone.
+    local f owner group cur want=0755 changed=0 kept=0 missing=0 listed
+    for f in $SUID_DIET_BINARIES; do
+        if [ ! -e "$f" ]; then
+            missing=$((missing + 1))
+            continue
+        fi
+        owner=$(stat -c %U "$f"); group=$(stat -c %G "$f"); cur=$(stat -c %a "$f")
+        listed=$(dpkg-statoverride --list "$f" 2>/dev/null || true)
+        if [ "$cur" = "755" ] && [ "$listed" = "$owner $group 755 $f" ]; then
+            kept=$((kept + 1))
+            continue
+        fi
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf '    %s(dry-run)%s would pin %s at %s %s %s via dpkg-statoverride (currently %s%s)\n' \
+                "$c_yellow" "$c_reset" "$f" "$owner" "$group" "$want" "$cur" "${listed:+, override present}"
+            continue
+        fi
+        # --update applies the mode now; the override keeps it through upgrades.
+        [ -z "$listed" ] || dpkg-statoverride --remove "$f" >/dev/null
+        dpkg-statoverride --update --add "$owner" "$group" "$want" "$f" >/dev/null
+        changed=$((changed + 1))
+        warn "$f: $cur -> 755 ($owner:$group), pinned in dpkg-statoverride so the next upgrade cannot hand the bit back"
+    done
+    if [ "$DRY_RUN" -eq 1 ]; then
+        return 0
+    fi
+    if [ "$changed" -gt 0 ]; then
+        ok "SUID diet: $changed binar$([ "$changed" -eq 1 ] && echo y || echo ies) stripped and pinned ($kept already on the diet$([ "$missing" -gt 0 ] && echo ", $missing not installed"))"
+    else
+        ok "SUID diet already in place ($kept pinned$([ "$missing" -gt 0 ] && echo ", $missing not installed"))"
+    fi
+    # Report, never touch: anything setuid root outside the known list is
+    # news - a package that arrived with a boundary of its own.
+    local unknown=""
+    while IFS= read -r f; do
+        case " $SUID_KNOWN_ROOT " in *" $f "*) ;; *) unknown="$unknown $f";; esac
+    done < <(find / -xdev -type f -perm -4000 -user root 2>/dev/null | sort)
+    if [ -n "$unknown" ]; then
+        warn "setuid-root binaries outside the known list (review each):$unknown"
+    else
+        ok "every remaining setuid-root binary is on the known list (su, sudo, passwd, mount, umount, ssh-keysign, exim4, dbus helper)"
+    fi
+}
+
 main() {
     require_root
     check_debian
@@ -3507,6 +3589,7 @@ main() {
     [ "$DO_VAR_TMP_CONFINEMENT" -eq 1 ] && echo "    - /var/tmp confinement (bind mount with nodev,nosuid,noexec + fstab pin)"
     [ "$DO_SERVICE_PURGE" -eq 1 ] && echo "    - attack-surface services purged (avahi-daemon, cups + cups-daemon/-browsed, rpcbind)"
     [ "$DO_KERNEL_SURFACE" -eq 1 ] && echo "    - kernel attack surface closed (io_uring off, SysRq hotkeys off, no tty ldisc autoload, no unprivileged userns)"
+    [ "$DO_SUID_DIET" -eq 1 ] && echo "    - SUID diet: chfn, chsh, gpasswd, newgrp, expiry lose setuid/setgid (dpkg-statoverride pins)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3566,6 +3649,7 @@ main() {
     setup_var_tmp_confinement
     setup_service_purge
     setup_kernel_surface
+    setup_suid_diet
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

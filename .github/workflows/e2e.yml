@@ -253,6 +253,13 @@ jobs:
           grep -H . /proc/sys/kernel/io_uring_disabled /proc/sys/kernel/sysrq /proc/sys/dev/tty/ldisc_autoload /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true
           SH
 
+      # Step 46 has natural offenders: the passwd and login packages ship
+      # chfn/chsh/gpasswd/newgrp setuid root and expiry setgid shadow. Nothing
+      # to plant - log the shipped modes so the flip is visible.
+      - name: Log the shipped setuid/setgid modes step 46 will strip
+        run: |
+          docker exec db-harden-node stat -c "%a %U:%G %n" /usr/bin/chfn /usr/bin/chsh /usr/bin/gpasswd /usr/bin/newgrp /usr/bin/expiry
+
       - name: Plant loosened apt trust gates for step 42 to override
         run: |
           docker exec db-harden-node bash -c '
@@ -267,7 +274,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab /usr/share/pam-configs/hardening-pwhistory /etc/pam.d/common-password /etc/security/opasswd /etc/ssh/sshd_config.d/95-hardening-crypto.conf /etc/sysctl.d/99-hardening-fs.conf /etc/shadow /etc/group /etc/sysctl.d/99-hardening-exploit.conf /etc/systemd/timesyncd.conf.d/99-hardening.conf /etc/apt/apt.conf.d/99-hardening-apt-trust /etc/sysctl.d/99-hardening-kernel-surface.conf"
+          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab /usr/share/pam-configs/hardening-pwhistory /etc/pam.d/common-password /etc/security/opasswd /etc/ssh/sshd_config.d/95-hardening-crypto.conf /etc/sysctl.d/99-hardening-fs.conf /etc/shadow /etc/group /etc/sysctl.d/99-hardening-exploit.conf /etc/systemd/timesyncd.conf.d/99-hardening.conf /etc/apt/apt.conf.d/99-hardening-apt-trust /etc/sysctl.d/99-hardening-kernel-surface.conf /var/lib/dpkg/statoverride"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \
