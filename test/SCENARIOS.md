@@ -53,8 +53,9 @@ cd test
 | 33 | `--no-time-sync` | systemd-timesyncd stays uninstalled (the fresh node image has no time daemon — absence is the offender) and no timesyncd drop-in is written, the rest still applies |
 | 34 | `--no-apt-trust` | a planted `APT::Get::AllowUnauthenticated "true"` stays the *effective* config (`apt-config dump`, apt's merged view) and no `99-hardening-apt-trust` pin is written, the rest still applies |
 | 35 | `--no-var-tmp-confinement` | `/var/tmp` stays a plain directory (no bind mount — the fresh node ships it that way, absence is the offender) and a binary staged there still executes, the rest still applies |
+| 36 | `--no-service-purge` | a planted `rpcbind` survives the run (the fresh node image ships none of the three, so one is installed first), the rest still applies |
 
-**Result: 87/87 checks pass.**
+**Result: 89/89 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

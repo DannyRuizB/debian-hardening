@@ -576,6 +576,20 @@ got=$(val s35 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s35 >/dev/null 2>&1
 
+echo "-- 36. Skip a step: --no-service-purge ----------------------"
+fresh_node s36
+# Plant the smallest of the three (rpcbind) — with the step skipped it must
+# survive the run; the fresh node image has none of them installed.
+docker exec s36 bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get install -y -qq --no-install-recommends rpcbind >/dev/null 2>&1'
+docker exec s36 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-service-purge -y >/dev/null 2>&1
+if docker exec s36 dpkg -s rpcbind >/dev/null 2>&1; then
+  P "--no-service-purge -> the planted rpcbind survives (step skipped)"; else
+  F "--no-service-purge should leave rpcbind installed" "package gone"; fi
+got=$(val s36 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s36 >/dev/null 2>&1
+
 echo "============================================================="
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"

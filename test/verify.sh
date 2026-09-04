@@ -1226,6 +1226,23 @@ else
 fi
 on_node rm -f /var/tmp/db-harden-probe 2>/dev/null || true
 
+echo "== Step 44: attack-surface services =="
+# The CI installs avahi-daemon, cups (metapackage AND cups-daemon) and rpcbind
+# on the node before hardening, so each of these flips red-to-green from real
+# work — and the cups-daemon line is the measured trap (purging `cups` alone
+# leaves cupsd installed).
+for pkg in avahi-daemon cups cups-daemon cups-browsed rpcbind; do
+  if on_node dpkg -s "$pkg" >/dev/null 2>&1; then
+    fail "$pkg is purged"
+  else
+    pass "$pkg is purged"
+  fi
+done
+# Behavioural: the three listeners are gone — nothing on mDNS (udp/5353),
+# IPP (tcp/631) or the portmapper (tcp+udp/111).
+expect_ok "nothing listens on mDNS, IPP or the portmapper (5353/631/111)" \
+  bash -c "'! ss -lntu | grep -E \":(5353|631|111)[[:space:]]\"'"
+
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
 # few attempts right after a (re)start while it catches up with the journal, so
