@@ -292,6 +292,8 @@
 #                          tty ldisc autoload, unprivileged user namespaces)
 #   --no-suid-diet         skip stripping setuid/setgid from chfn, chsh, gpasswd,
 #                          newgrp and expiry (pinned with dpkg-statoverride)
+#   --no-process-limits    skip the per-session process cap (nproc 4096 via
+#                          limits.d; root untouched)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -350,6 +352,7 @@ DO_VAR_TMP_CONFINEMENT=1
 DO_SERVICE_PURGE=1
 DO_KERNEL_SURFACE=1
 DO_SUID_DIET=1
+DO_PROCESS_LIMITS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -438,6 +441,7 @@ parse_args() {
             --no-service-purge) DO_SERVICE_PURGE=0; shift;;
             --no-kernel-surface) DO_KERNEL_SURFACE=0; shift;;
             --no-suid-diet) DO_SUID_DIET=0; shift;;
+            --no-process-limits) DO_PROCESS_LIMITS=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3539,6 +3543,67 @@ setup_suid_diet() {
     fi
 }
 
+# ---- Step 47: per-session process limits (fork bombs) ------------------------
+NPROC_DROPIN=/etc/security/limits.d/99-hardening-nproc.conf
+NPROC_LIMIT=4096
+
+setup_process_limits() {
+    [ "$DO_PROCESS_LIMITS" -eq 1 ] || { log "Skipping per-session process limits"; return 0; }
+    log "Capping processes per login session (nproc $NPROC_LIMIT, root untouched)"
+    # A compromised or careless account with no process cap can take the box
+    # down with one line - the fork bomb - or with a runaway build that never
+    # stops spawning. Debian ships every session UNLIMITED (measured:
+    # `ulimit -u` and `ulimit -Hu` both "unlimited" for a fresh user). One
+    # limits.d drop-in caps nproc for every PAM session: sshd, login, su and
+    # sudo all carry pam_limits on Debian 13 (measured, the stock stacks), so
+    # the cap lands where a compromised account arrives. Root's OWN logins
+    # are left alone ('*' never matches root - the step-11 lesson - and root
+    # is not the threat model); systemd services are not PAM sessions and
+    # keep their own DefaultTasksMax. The hard limit is the promise:
+    # measured, a capped session can lower and re-raise its soft limit up to
+    # the hard one, but `ulimit -u 8192` above it is "Operation not
+    # permitted". And measured against the obvious escape: rlimits are
+    # INHERITED, so `sudo` from a capped session stays capped at 4096 - an
+    # explicit `root ... unlimited` line does not lift it (pam_limits in
+    # sudo's stack cannot raise what the parent already lowered). The cap
+    # follows the session, sudo included; a root login of its own is the
+    # unthrottled path.
+    local content
+    content=$(cat <<EOF
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+# Processes per login session (fork bombs, runaway spawns). Root is not
+# matched by '*' on purpose; systemd services are not PAM sessions.
+*    soft    nproc    $NPROC_LIMIT
+*    hard    nproc    $NPROC_LIMIT
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s (soft/hard nproc %s for every non-root session)\n' "$c_yellow" "$c_reset" "$NPROC_DROPIN" "$NPROC_LIMIT"
+        return 0
+    fi
+    if [ -f "$NPROC_DROPIN" ] && [ "$(cat "$NPROC_DROPIN")" = "$content" ]; then
+        ok "per-session process limit already in place (nproc $NPROC_LIMIT)"
+    else
+        install -d -m 755 /etc/security/limits.d
+        printf '%s\n' "$content" > "$NPROC_DROPIN"
+        chmod 644 "$NPROC_DROPIN"
+        ok "Wrote $NPROC_DROPIN: every new non-root session gets nproc $NPROC_LIMIT (hard)"
+    fi
+    # The drop-in only bites if pam_limits sits in the session stacks. Debian
+    # ships it in sshd/login/su/sudo; report, never edit, if a stack lost it.
+    local missing=""
+    for stack in sshd login su sudo; do
+        [ -f "/etc/pam.d/$stack" ] || continue
+        grep -qE '^\s*session\s+required\s+pam_limits\.so' "/etc/pam.d/$stack" || missing="$missing $stack"
+    done
+    if [ -n "$missing" ]; then
+        warn "pam_limits is missing from these PAM stacks - the cap will not apply there:$missing"
+    else
+        ok "pam_limits present in the sshd, login, su and sudo stacks (the cap applies at every door)"
+    fi
+    ok "A fork bomb from a login session now dies at $NPROC_LIMIT processes instead of taking the box with it"
+}
+
 main() {
     require_root
     check_debian
@@ -3590,6 +3655,7 @@ main() {
     [ "$DO_SERVICE_PURGE" -eq 1 ] && echo "    - attack-surface services purged (avahi-daemon, cups + cups-daemon/-browsed, rpcbind)"
     [ "$DO_KERNEL_SURFACE" -eq 1 ] && echo "    - kernel attack surface closed (io_uring off, SysRq hotkeys off, no tty ldisc autoload, no unprivileged userns)"
     [ "$DO_SUID_DIET" -eq 1 ] && echo "    - SUID diet: chfn, chsh, gpasswd, newgrp, expiry lose setuid/setgid (dpkg-statoverride pins)"
+    [ "$DO_PROCESS_LIMITS" -eq 1 ] && echo "    - per-session process cap (nproc 4096 for every non-root login; fork bombs die small)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3650,6 +3716,7 @@ main() {
     setup_service_purge
     setup_kernel_surface
     setup_suid_diet
+    setup_process_limits
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

@@ -628,6 +628,23 @@ got=$(val s38 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s38 >/dev/null 2>&1
 
+echo "-- 39. Skip a step: --no-process-limits -----------------------"
+fresh_node s39
+# The fresh node ships every session unlimited (natural offender): with the
+# step skipped, no drop-in appears and a login session of the admin user
+# (su -l runs the same pam_limits stack sshd does) stays unlimited.
+docker exec s39 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-process-limits -y >/dev/null 2>&1
+if docker exec s39 test -f /etc/security/limits.d/99-hardening-nproc.conf 2>/dev/null; then
+  F "--no-process-limits should not write the nproc drop-in" "file exists"; else
+  P "--no-process-limits -> no nproc drop-in written"; fi
+got=$(docker exec s39 su -l opsadmin -c 'ulimit -Hu' 2>/dev/null)
+[ "$got" = unlimited ] && P "--no-process-limits -> the admin session stays unlimited (step skipped)" \
+                       || F "--no-process-limits should leave the process limit alone" "$got"
+got=$(val s39 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s39 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
