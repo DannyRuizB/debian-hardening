@@ -288,6 +288,8 @@
 #   --no-apt-trust         skip the apt trust pins (unsigned repos, unauthenticated installs)
 #   --no-var-tmp-confinement skip /var/tmp hardening (bind mount, nodev,nosuid,noexec + fstab pin)
 #   --no-service-purge     skip purging avahi-daemon, cups(-daemon/-browsed) and rpcbind
+#   --no-kernel-surface    skip the kernel attack-surface sysctls (io_uring, SysRq,
+#                          tty ldisc autoload, unprivileged user namespaces)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -344,6 +346,7 @@ DO_TIME_SYNC=1
 DO_APT_TRUST=1
 DO_VAR_TMP_CONFINEMENT=1
 DO_SERVICE_PURGE=1
+DO_KERNEL_SURFACE=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -430,6 +433,7 @@ parse_args() {
             --no-apt-trust) DO_APT_TRUST=0; shift;;
             --no-var-tmp-confinement) DO_VAR_TMP_CONFINEMENT=0; shift;;
             --no-service-purge) DO_SERVICE_PURGE=0; shift;;
+            --no-kernel-surface) DO_KERNEL_SURFACE=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3369,6 +3373,90 @@ setup_service_purge() {
     ok "The box no longer announces itself, prints for strangers or maps ports for anyone who asks"
 }
 
+# ---- Step 45: kernel attack surface (io_uring, SysRq, ldisc autoload, userns) --
+KERNEL_SURFACE_DROPIN=/etc/sysctl.d/99-hardening-kernel-surface.conf
+
+setup_kernel_surface() {
+    [ "$DO_KERNEL_SURFACE" -eq 1 ] || { log "Skipping kernel attack-surface sysctls"; return 0; }
+    log "Closing kernel interfaces a server never needs (io_uring, SysRq, tty ldisc autoload, unprivileged userns)"
+    # Step 39 priced the exploit PRIMITIVES; this step closes whole
+    # INTERFACES — kernel code any local process can reach and a headless
+    # server has no use for. Each one is a bug class with a name:
+    #   kernel.io_uring_disabled=2 (kernels >= 6.6): io_uring is a ring
+    #     shared with the kernel for async I/O, and the most productive
+    #     kernel bug class of the 2020s — Google reported that 60% of the
+    #     exploits submitted to its kernel bounty in 2022 targeted it, and
+    #     switched it off on production servers, ChromeOS and Android.
+    #     2 refuses io_uring_setup(2) for EVERYONE with EPERM (measured; at
+    #     1 root still gets a ring — a partial pin, not this one). Nothing
+    #     in a Debian server base uses it.
+    #   kernel.sysrq=0: the magic SysRq hotkeys — from a console, a serial
+    #     line or a BMC: 'i' kills every process, 'b' reboots without sync,
+    #     'm'/'t' dump memory and task state to the log. Debian ships 438
+    #     (most of the mask open). 0 closes the KEYBOARD path; root's
+    #     /proc/sysrq-trigger bypasses the mask by design and stays.
+    #   dev.tty.ldisc_autoload=0: any tty owner can request a line
+    #     discipline and the kernel autoloads its module — n_hdlc, slip,
+    #     ppp_async... a string of unprivileged LPEs came from exactly that
+    #     path. 0 = only CAP_SYS_MODULE gets a discipline loaded.
+    #   kernel.unprivileged_userns_clone=0 (Debian/Ubuntu kernels): an
+    #     unprivileged user namespace hands any local account a fake
+    #     CAP_SYS_ADMIN inside it — the amplifier under most modern LPEs
+    #     (netfilter, overlayfs, ...). Upstream kernels don't carry the knob
+    #     (this WSL one, measured): the drop-in pins it for the kernels that
+    #     do, the live write notes. user.max_user_namespaces=0 is NOT the
+    #     substitute — it forbids root too (containers, PrivateUsers=).
+    local desired
+    desired=$(cat <<'EOF'
+# Managed by harden.sh (kernel attack-surface step). Edit the script, not this file.
+# Close the kernel interfaces a headless server never needs: no io_uring
+# rings, no magic SysRq hotkeys, no tty line-discipline autoload, no
+# unprivileged user namespaces (where the kernel carries the knob).
+kernel.io_uring_disabled = 2
+kernel.sysrq = 0
+dev.tty.ldisc_autoload = 0
+kernel.unprivileged_userns_clone = 0
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s and apply it with sysctl\n' "$c_yellow" "$c_reset" "$KERNEL_SURFACE_DROPIN"
+        return 0
+    fi
+    if [ -f "$KERNEL_SURFACE_DROPIN" ] && [ "$(cat "$KERNEL_SURFACE_DROPIN")" = "$desired" ]; then
+        ok "kernel attack-surface drop-in already in place"
+    else
+        printf '%s\n' "$desired" > "$KERNEL_SURFACE_DROPIN"
+        chmod 644 "$KERNEL_SURFACE_DROPIN"
+        chown root:root "$KERNEL_SURFACE_DROPIN"
+        ok "Wrote $KERNEL_SURFACE_DROPIN"
+    fi
+    # Live, the step-39 shape: a key this kernel doesn't expose (io_uring on
+    # < 6.6, userns_clone on upstream builds) is a note, never a failure —
+    # the drop-in carries the pin for the kernels that have it.
+    local applied=0 skipped=0 k v
+    for kv in \
+        "kernel.io_uring_disabled 2" \
+        "kernel.sysrq 0" \
+        "dev.tty.ldisc_autoload 0" \
+        "kernel.unprivileged_userns_clone 0"; do
+        k="${kv% *}"; v="${kv#* }"
+        if [ ! -e "/proc/sys/${k//./\/}" ]; then
+            warn "$k does not exist on this kernel — pinned in the drop-in for kernels that have it"
+        elif [ "$(sysctl -n "$k" 2>/dev/null || echo missing)" = "$v" ]; then
+            skipped=$((skipped + 1))
+        elif sysctl -q -w "$k=$v" 2>/dev/null; then
+            applied=$((applied + 1))
+        else
+            warn "$k not settable here — the drop-in applies where it can"
+        fi
+    done
+    if [ "$applied" -gt 0 ]; then
+        ok "Closed $applied kernel interface(s) live ($skipped already closed)"
+    else
+        ok "kernel attack-surface sysctls already at target ($skipped present and set)"
+    fi
+}
+
 main() {
     require_root
     check_debian
@@ -3418,6 +3506,7 @@ main() {
     [ "$DO_APT_TRUST" -eq 1 ] && echo "    - apt source trust (no unsigned repos, no unauthenticated installs — pinned in apt.conf.d)"
     [ "$DO_VAR_TMP_CONFINEMENT" -eq 1 ] && echo "    - /var/tmp confinement (bind mount with nodev,nosuid,noexec + fstab pin)"
     [ "$DO_SERVICE_PURGE" -eq 1 ] && echo "    - attack-surface services purged (avahi-daemon, cups + cups-daemon/-browsed, rpcbind)"
+    [ "$DO_KERNEL_SURFACE" -eq 1 ] && echo "    - kernel attack surface closed (io_uring off, SysRq hotkeys off, no tty ldisc autoload, no unprivileged userns)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3476,6 +3565,7 @@ main() {
     setup_apt_trust
     setup_var_tmp_confinement
     setup_service_purge
+    setup_kernel_surface
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

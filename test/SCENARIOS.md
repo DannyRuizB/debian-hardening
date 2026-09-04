@@ -54,8 +54,9 @@ cd test
 | 34 | `--no-apt-trust` | a planted `APT::Get::AllowUnauthenticated "true"` stays the *effective* config (`apt-config dump`, apt's merged view) and no `99-hardening-apt-trust` pin is written, the rest still applies |
 | 35 | `--no-var-tmp-confinement` | `/var/tmp` stays a plain directory (no bind mount — the fresh node ships it that way, absence is the offender) and a binary staged there still executes, the rest still applies |
 | 36 | `--no-service-purge` | a planted `rpcbind` survives the run (the fresh node image ships none of the three, so one is installed first), the rest still applies |
+| 37 | `--no-kernel-surface` | a planted `kernel.sysrq=438` (Debian's default, the hotkeys fully open) survives the run and no kernel-surface drop-in is written, the rest still applies — host-global in a privileged container, so the scenario restores the mask it found |
 
-**Result: 89/89 checks pass.**
+**Result: 92/92 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
