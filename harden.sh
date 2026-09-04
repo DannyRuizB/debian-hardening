@@ -294,6 +294,8 @@
 #                          newgrp and expiry (pinned with dpkg-statoverride)
 #   --no-process-limits    skip the per-session process cap (nproc 4096 via
 #                          limits.d; root untouched)
+#   --no-console-reboot    skip closing the Ctrl+Alt+Del reboot path (mask the
+#                          target + CtrlAltDelBurstAction=none)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -353,6 +355,7 @@ DO_SERVICE_PURGE=1
 DO_KERNEL_SURFACE=1
 DO_SUID_DIET=1
 DO_PROCESS_LIMITS=1
+DO_CONSOLE_REBOOT=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -442,6 +445,7 @@ parse_args() {
             --no-kernel-surface) DO_KERNEL_SURFACE=0; shift;;
             --no-suid-diet) DO_SUID_DIET=0; shift;;
             --no-process-limits) DO_PROCESS_LIMITS=0; shift;;
+            --no-console-reboot) DO_CONSOLE_REBOOT=0; shift;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -3604,6 +3608,58 @@ EOF
     ok "A fork bomb from a login session now dies at $NPROC_LIMIT processes instead of taking the box with it"
 }
 
+# ---- Step 48: console reboot surface (Ctrl+Alt+Del) --------------------------
+CAD_BURST_DROPIN=/etc/systemd/system.conf.d/99-hardening-ctrlaltdel.conf
+
+setup_console_reboot() {
+    [ "$DO_CONSOLE_REBOOT" -eq 1 ] || { log "Skipping console reboot surface"; return 0; }
+    log "Closing the Ctrl+Alt+Del reboot path (mask the target, disable the burst action)"
+    # A Ctrl+Alt+Del at any console - a physical keyboard, a serial line, a
+    # hypervisor's "send Ctrl+Alt+Del", a BMC - reboots the box with no
+    # credential. On a server that is a local denial of service, and there is
+    # nobody sitting at the console who needs it. Two doors, both measured:
+    #   1. systemd ships ctrl-alt-del.target as an ALIAS of reboot.target
+    #      (measured: `systemctl is-enabled` says "alias"). Masking it points
+    #      the symlink at /dev/null so a single Ctrl+Alt+Del does nothing.
+    #   2. Seven Ctrl+Alt+Dels within 2 s trip a SEPARATE path -
+    #      CtrlAltDelBurstAction, default reboot-force, which bypasses the
+    #      target and reboots HARD (no unmount, no sync). Masking the target
+    #      does not touch it; `CtrlAltDelBurstAction=none` in system.conf.d
+    #      closes it. No runtime query exposes it, so verify reads the drop-in
+    #      (config-effective) while the masked target is proven behaviourally.
+    # Root can still reboot with `systemctl reboot`; this is about the console
+    # keystroke, not about taking the ability away from an administrator.
+    local burst
+    burst=$(cat <<'EOF'
+# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+# Seven Ctrl+Alt+Dels in 2 s force a reboot by a path the masked target does
+# not cover; none closes it. Root's `systemctl reboot` is unaffected.
+[Manager]
+CtrlAltDelBurstAction=none
+EOF
+)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would mask ctrl-alt-del.target and write %s (CtrlAltDelBurstAction=none)\n' "$c_yellow" "$c_reset" "$CAD_BURST_DROPIN"
+        return 0
+    fi
+    if [ "$(systemctl is-enabled ctrl-alt-del.target 2>/dev/null)" = "masked" ]; then
+        ok "ctrl-alt-del.target already masked"
+    else
+        systemctl mask ctrl-alt-del.target >/dev/null 2>&1
+        ok "Masked ctrl-alt-del.target (a single Ctrl+Alt+Del now does nothing)"
+    fi
+    install -d -m 755 /etc/systemd/system.conf.d
+    if [ -f "$CAD_BURST_DROPIN" ] && [ "$(cat "$CAD_BURST_DROPIN")" = "$burst" ]; then
+        ok "CtrlAltDelBurstAction drop-in already in place"
+    else
+        printf '%s\n' "$burst" > "$CAD_BURST_DROPIN"
+        chmod 644 "$CAD_BURST_DROPIN"
+        systemctl daemon-reload 2>/dev/null || true
+        ok "Wrote $CAD_BURST_DROPIN: the seven-press burst reboot is off"
+    fi
+    ok "The console reboot keystroke is dead; an administrator still reboots with systemctl"
+}
+
 main() {
     require_root
     check_debian
@@ -3656,6 +3712,7 @@ main() {
     [ "$DO_KERNEL_SURFACE" -eq 1 ] && echo "    - kernel attack surface closed (io_uring off, SysRq hotkeys off, no tty ldisc autoload, no unprivileged userns)"
     [ "$DO_SUID_DIET" -eq 1 ] && echo "    - SUID diet: chfn, chsh, gpasswd, newgrp, expiry lose setuid/setgid (dpkg-statoverride pins)"
     [ "$DO_PROCESS_LIMITS" -eq 1 ] && echo "    - per-session process cap (nproc 4096 for every non-root login; fork bombs die small)"
+    [ "$DO_CONSOLE_REBOOT" -eq 1 ] && echo "    - console reboot surface closed (Ctrl+Alt+Del target masked, burst action off)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3717,6 +3774,7 @@ main() {
     setup_kernel_surface
     setup_suid_diet
     setup_process_limits
+    setup_console_reboot
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

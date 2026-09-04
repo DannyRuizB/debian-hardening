@@ -645,6 +645,22 @@ got=$(val s39 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s39 >/dev/null 2>&1
 
+echo "-- 40. Skip a step: --no-console-reboot ----------------------"
+fresh_node s40
+# The fresh node ships ctrl-alt-del.target as an alias (natural offender): with
+# the step skipped it must stay an alias and no burst drop-in may appear.
+docker exec s40 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-console-reboot -y >/dev/null 2>&1
+got=$(docker exec s40 systemctl is-enabled ctrl-alt-del.target 2>/dev/null)
+[ "$got" = alias ] && P "--no-console-reboot -> ctrl-alt-del.target stays an alias (step skipped)" \
+                   || F "--no-console-reboot should leave ctrl-alt-del.target alone" "$got"
+if docker exec s40 test -f /etc/systemd/system.conf.d/99-hardening-ctrlaltdel.conf 2>/dev/null; then
+  F "--no-console-reboot should not write the burst drop-in" "file exists"; else
+  P "--no-console-reboot -> no CtrlAltDelBurstAction drop-in written"; fi
+got=$(val s40 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s40 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
