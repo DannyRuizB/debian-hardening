@@ -1337,8 +1337,11 @@ echo "== Step 48: console reboot surface =="
 # masking flips it to "masked" and points the symlink at /dev/null - both
 # behavioural. is-enabled exits non-zero for a masked unit, so read its word
 # through grep, not its exit code.
+# is-enabled exits non-zero for a masked unit, and verify runs under
+# `set -o pipefail`, so read the word through a shell that swallows the exit
+# code (grep still sees "masked"); the exit is not the signal here.
 expect_line "a single Ctrl+Alt+Del is dead (ctrl-alt-del.target masked)" '^masked$' \
-  sudo systemctl is-enabled ctrl-alt-del.target
+  sudo bash -c "'systemctl is-enabled ctrl-alt-del.target 2>&1 || true'"
 expect_line "the masked target points at /dev/null" '^/dev/null$' \
   readlink /etc/systemd/system/ctrl-alt-del.target
 # The seven-press burst is a separate path with no runtime query - read the
