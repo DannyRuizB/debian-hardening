@@ -1323,10 +1323,11 @@ expect_line "the admin session's soft process limit is 4096 (effective)" '^4096$
 # limit alone is a suggestion the fork bomb's shell can undo).
 expect_line "the session cannot raise its own cap (ulimit -u 8192 -> Operation not permitted)" 'Operation not permitted' \
   bash -c "'ulimit -u 8192 2>&1 || true'"
-# Root is not the threat model and '*' never matches it: a sudo shell keeps
-# an unlimited process budget (measured), so an emergency as root is not
-# throttled by this step.
-expect_line "root stays unlimited (sudo shell: ulimit -Hu)" '^unlimited$' \
+# Measured against the obvious escape: rlimits are inherited, so a sudo shell
+# opened from the capped session is capped too (an explicit root line in the
+# drop-in does not lift it - pam_limits cannot raise what the parent lowered).
+# The cap follows the session, sudo included; root's own logins stay unlimited.
+expect_line "sudo from the capped session inherits the cap (ulimit -Hu = 4096, no escape through sudo)" '^4096$' \
   sudo bash -c "'ulimit -Hu'"
 expect_ok "pam_limits sits in the sshd PAM stack (the cap actually applies at the door)" \
   grep -qE "'^\s*session\s+required\s+pam_limits\.so'" /etc/pam.d/sshd

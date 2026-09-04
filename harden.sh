@@ -3556,12 +3556,18 @@ setup_process_limits() {
     # `ulimit -u` and `ulimit -Hu` both "unlimited" for a fresh user). One
     # limits.d drop-in caps nproc for every PAM session: sshd, login, su and
     # sudo all carry pam_limits on Debian 13 (measured, the stock stacks), so
-    # the cap lands where a compromised account arrives. Root is left alone
-    # ('*' never matches root - the step-11 lesson - and root is not the
-    # threat model here); systemd services are not PAM sessions and keep
-    # their own DefaultTasksMax. The hard limit is the promise: measured,
-    # a capped session can lower and re-raise its soft limit up to the hard
-    # one, but `ulimit -u 8192` above it is "Operation not permitted".
+    # the cap lands where a compromised account arrives. Root's OWN logins
+    # are left alone ('*' never matches root - the step-11 lesson - and root
+    # is not the threat model); systemd services are not PAM sessions and
+    # keep their own DefaultTasksMax. The hard limit is the promise:
+    # measured, a capped session can lower and re-raise its soft limit up to
+    # the hard one, but `ulimit -u 8192` above it is "Operation not
+    # permitted". And measured against the obvious escape: rlimits are
+    # INHERITED, so `sudo` from a capped session stays capped at 4096 - an
+    # explicit `root ... unlimited` line does not lift it (pam_limits in
+    # sudo's stack cannot raise what the parent already lowered). The cap
+    # follows the session, sudo included; a root login of its own is the
+    # unthrottled path.
     local content
     content=$(cat <<EOF
 # Managed by debian-hardening (harden.sh). Edit flags, not this file.
