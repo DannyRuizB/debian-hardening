@@ -57,8 +57,9 @@ cd test
 | 37 | `--no-kernel-surface` | a planted `kernel.sysrq=438` (Debian's default, the hotkeys fully open) survives the run and no kernel-surface drop-in is written, the rest still applies — host-global in a privileged container, so the scenario restores the mask it found |
 | 38 | `--no-suid-diet` | `chfn` keeps its shipped setuid bit (4755) and no `dpkg-statoverride` pin appears, the rest still applies |
 | 39 | `--no-process-limits` | no nproc drop-in is written and a login session of the admin user (`su -l`, the same `pam_limits` stack as sshd) stays `unlimited`, the rest still applies |
+| 40 | `--no-console-reboot` | `ctrl-alt-del.target` stays an alias of `reboot.target` and no `CtrlAltDelBurstAction` drop-in is written, the rest still applies |
 
-**Result: 98/98 checks pass.**
+**Result: 101/101 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
