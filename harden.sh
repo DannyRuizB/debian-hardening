@@ -296,6 +296,9 @@
 #                          limits.d; root untouched)
 #   --no-console-reboot    skip closing the Ctrl+Alt+Del reboot path (mask the
 #                          target + CtrlAltDelBurstAction=none)
+#   --no-egress            skip egress filtering (outbound stays wide open)
+#   --egress-allow N[/proto] extra outbound port to allow (repeatable), e.g.
+#                          22/tcp for git-over-SSH or 587/tcp for a mail relay
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -309,6 +312,7 @@ SSH_PORT=22
 ADMIN_USER=""
 ADMIN_PUBKEY=""
 EXTRA_PORTS=()
+EGRESS_PORTS=()
 DO_SSH=1
 DO_UFW=1
 DO_FAIL2BAN=1
@@ -356,6 +360,7 @@ DO_KERNEL_SURFACE=1
 DO_SUID_DIET=1
 DO_PROCESS_LIMITS=1
 DO_CONSOLE_REBOOT=1
+DO_EGRESS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -446,6 +451,8 @@ parse_args() {
             --no-suid-diet) DO_SUID_DIET=0; shift;;
             --no-process-limits) DO_PROCESS_LIMITS=0; shift;;
             --no-console-reboot) DO_CONSOLE_REBOOT=0; shift;;
+            --no-egress)       DO_EGRESS=0; shift;;
+            --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
             --dry-run)         DRY_RUN=1; shift;;
@@ -606,7 +613,16 @@ setup_ufw() {
     log "Configuring UFW firewall"
     command -v ufw >/dev/null 2>&1 || run apt-get install -y ufw
     run ufw --force default deny incoming
-    run ufw --force default allow outgoing
+    # What may go OUT is the egress step's call (step 49). When it is going to
+    # run, don't open the outbound default here just to have it closed again
+    # seconds later - the log would read "policy allow" then "policy reject"
+    # on every single pass. With --no-egress this step keeps its old promise
+    # and opens it explicitly.
+    if [ "$DO_EGRESS" -eq 1 ]; then
+        log "Outbound policy left to the egress step (--no-egress opens it here)"
+    else
+        run ufw --force default allow outgoing
+    fi
     run ufw allow "${SSH_PORT}/tcp"
     local p
     for p in "${EXTRA_PORTS[@]:-}"; do
@@ -3660,6 +3676,75 @@ EOF
     ok "The console reboot keystroke is dead; an administrator still reboots with systemctl"
 }
 
+# ---- Step 49: egress filtering (outbound allowlist) -------------------------
+# Every port the box is allowed to START a connection on. Step 5 decided who
+# may reach the box; this decides what the box may reach.
+EGRESS_ALLOW=(53/udp 53/tcp 123/udp 80/tcp 443/tcp 67:68/udp)
+
+setup_egress() {
+    [ "$DO_EGRESS" -eq 1 ] || { log "Skipping egress filtering (outbound stays wide open)"; return 0; }
+    if [ "$DO_UFW" -ne 1 ]; then
+        warn "Egress filtering needs the firewall step - skipped (--no-ufw was given)"
+        return 0
+    fi
+    log "Filtering outbound traffic (default reject + allowlist)"
+    # `default deny incoming` is the door an attacker knocks on; the OUTBOUND
+    # policy is the one they use once they are already inside, and Debian -
+    # and step 5 with it - leaves it wide open (`default allow outgoing`).
+    # Every post-exploitation move starts there: the reverse shell dialling
+    # home on 4444, the dropper curling stage two off a random port, the exfil
+    # pushing a tarball out, the worm spraying 22 across the subnet. None of
+    # them needs an inbound hole; they all need this one.
+    #
+    # REJECT, not DROP, on purpose (both measured on the node): a rejected
+    # connection comes back ECONNREFUSED in about a second, a dropped one
+    # hangs for the full TCP timeout. Stealth buys nothing here - the attacker
+    # is already on the box and sees the same refusal either way - while the
+    # hang costs the administrator every debugging session for the next year.
+    #
+    # The allowlist is what a server needs to stay a server:
+    #   53/udp+tcp   DNS  - name resolution
+    #   123/udp      NTP  - step 41's clock, and the clock is a control
+    #   80,443/tcp   HTTP(S) - apt, unattended-upgrades, aide/rkhunter mirrors
+    #   67:68/udp    DHCP - THE trap: on a DHCP-addressed VPS a blocked lease
+    #                RENEWAL takes the box's own IP away hours later, and with
+    #                it the SSH session you came in on. Egress filtering is
+    #                where "won't lock you out" gets tested for real.
+    # Two omissions are deliberate, and both are the point rather than an
+    # oversight: outbound 22 (the box can no longer ssh, scp or git-clone out -
+    # that is the lateral movement this step exists to stop) and outbound
+    # 25/587 (a relay to a real MTA; local delivery is loopback and untouched,
+    # so root's cron mail still arrives). Anything a site genuinely needs goes
+    # back in with --egress-allow, the outbound twin of --allow-port.
+    local wanted=() p
+    for p in "${EGRESS_ALLOW[@]}" "${EGRESS_PORTS[@]:-}"; do
+        [ -n "$p" ] && wanted+=("$p")
+    done
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would set the UFW outgoing policy to reject and allow out: %s\n' \
+            "$c_yellow" "$c_reset" "${wanted[*]}"
+        return 0
+    fi
+    local current
+    current=$(sed -n 's/^DEFAULT_OUTPUT_POLICY="\(.*\)"/\1/p' /etc/default/ufw 2>/dev/null)
+    if [ "$current" = "REJECT" ]; then
+        ok "Outbound policy already reject"
+    else
+        # ufw applies the new policy live when the firewall is already enabled
+        # (measured: the next connection to a non-allowlisted port is refused
+        # immediately), so the allowlist goes in right after.
+        ufw --force default reject outgoing >/dev/null 2>&1
+        ok "Outbound policy is now reject (was ${current:-allow})"
+    fi
+    local count=0
+    for p in "${wanted[@]}"; do
+        ufw allow out "$p" >/dev/null 2>&1 && count=$((count + 1))
+    done
+    ok "Outbound allowlist active ($count rules: ${wanted[*]})"
+    ok "A reverse shell on a random port now dies at the box's own firewall"
+}
+
+
 main() {
     require_root
     check_debian
@@ -3713,6 +3798,7 @@ main() {
     [ "$DO_SUID_DIET" -eq 1 ] && echo "    - SUID diet: chfn, chsh, gpasswd, newgrp, expiry lose setuid/setgid (dpkg-statoverride pins)"
     [ "$DO_PROCESS_LIMITS" -eq 1 ] && echo "    - per-session process cap (nproc 4096 for every non-root login; fork bombs die small)"
     [ "$DO_CONSOLE_REBOOT" -eq 1 ] && echo "    - console reboot surface closed (Ctrl+Alt+Del target masked, burst action off)"
+    [ "$DO_EGRESS" -eq 1 ] && echo "    - egress filtering (outbound reject + allowlist: DNS, NTP, HTTP/S, DHCP)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3775,6 +3861,7 @@ main() {
     setup_suid_diet
     setup_process_limits
     setup_console_reboot
+    setup_egress
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
