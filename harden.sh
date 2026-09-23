@@ -267,7 +267,7 @@
 #   --no-journald          skip persistent + size-capped journald logging
 #   --no-su-restriction    skip restricting su to the sugroup group (pam_wheel)
 #   --no-system-accounts   skip locking system accounts (nologin shell + locked password)
-#   --no-log-permissions   skip log file permissions (/var/log sweep + rsyslog create mode)
+#   --no-log-permissions   skip log file permissions (/var/log sweep + rsyslog create mode + apt log hook)
 #   --no-logrotate-perms   skip logrotate hardening (rotated logs re-created 0640)
 #   --no-auditd            skip the audit daemon (staged ruleset + enabled at boot)
 #   --no-home-permissions  skip home directory permissions (750 + legacy dotfiles)
@@ -1816,6 +1816,7 @@ setup_system_accounts() {
 
 # ---- Step 26: log file permissions (CIS 4.2.3) ----------------------------
 RSYSLOG_DROPIN=/etc/rsyslog.d/99-hardening.conf
+APT_LOGPERMS_DROPIN=/etc/apt/apt.conf.d/99-hardening-logperms
 
 setup_log_permissions() {
     [ "$DO_LOG_PERMISSIONS" -eq 1 ] || { log "Skipping log file permissions"; return 0; }
@@ -1831,11 +1832,12 @@ setup_log_permissions() {
     # keep 664 root:utmp, while btmp gets 660: failed logins famously
     # record usernames typed into the password prompt.
     #
-    # Two halves on purpose: fix the files that exist today, then teach
-    # rsyslog to create tomorrow's files restricted too — a sweep without
-    # the second half rots on the next logrotate cycle.
+    # Three parts on purpose: fix the files that exist today, then teach
+    # the two writers that recreate them to keep them restricted — rsyslog
+    # (a sweep without it rots on the next logrotate cycle) and apt, which
+    # resets its own logs to 644 on every run (measured, below).
     if [ "$DRY_RUN" -eq 1 ]; then
-        printf '    %s(dry-run)%s would tighten /var/log (g-wx,o-rwx; utmp family pinned) and pin rsyslog FileCreateMode 0640\n' \
+        printf '    %s(dry-run)%s would tighten /var/log (g-wx,o-rwx; utmp family pinned), pin rsyslog FileCreateMode 0640 and re-tighten apt'"'"'s logs after every dpkg run\n' \
             "$c_yellow" "$c_reset"
         return 0
     fi
@@ -1894,6 +1896,37 @@ setup_log_permissions() {
         fi
     else
         ok "rsyslog not installed — journald owns logging (hardened by the journald step)"
+    fi
+
+    # apt is the other writer, and it does not respect the sweep: MEASURED
+    # on the node, history.log and eipp.log.xz go back to 644 on every run
+    # that reaches dpkg — apt-get and python-apt alike, so unattended-upgrades
+    # undoes the sweep every night (term.log it pins 640 root:adm itself).
+    # apt has no knob for the mode, so a DPkg::Post-Invoke hook re-tightens
+    # the two files once dpkg is done; apt does not touch the mode again when
+    # it writes End-Date (measured: 640 survives the whole run). The hook can
+    # never fail an upgrade: missing files are ignored and it always returns 0.
+    local desired_apt
+    desired_apt=$(cat <<'EOF'
+// Managed by harden.sh (log-permissions step). Edit the script, not this file.
+// apt resets history.log and eipp.log.xz to 644 on every run; this puts
+// them back to owner+group only once dpkg is done.
+DPkg::Post-Invoke { "chmod g-wx,o-rwx /var/log/apt/history.log /var/log/apt/eipp.log.xz 2>/dev/null || true"; };
+EOF
+)
+    if [ -f "$APT_LOGPERMS_DROPIN" ] && [ "$(cat "$APT_LOGPERMS_DROPIN")" = "$desired_apt" ]; then
+        ok "apt log-permissions hook already in place"
+    else
+        printf '%s\n' "$desired_apt" > "$APT_LOGPERMS_DROPIN"
+        chmod 644 "$APT_LOGPERMS_DROPIN"
+        chown root:root "$APT_LOGPERMS_DROPIN"
+        local dump
+        if dump=$(apt-config dump 2>/dev/null) && printf '%s' "$dump" | grep -qF 'chmod g-wx,o-rwx /var/log/apt/history.log'; then
+            ok "apt re-tightens history.log and eipp.log.xz after every dpkg run"
+        else
+            rm -f "$APT_LOGPERMS_DROPIN"
+            warn "apt rejected the log-permissions hook — reverted, apt config untouched"
+        fi
     fi
     ok "Logs stay readable to their service and root — not to every local user"
 }
@@ -3776,7 +3809,7 @@ main() {
     [ "$DO_JOURNALD" -eq 1 ]        && echo "    - persistent, size-capped journald logging"
     [ "$DO_SU_RESTRICTION" -eq 1 ]  && echo "    - su restricted to the (empty) sugroup group"
     [ "$DO_SYSTEM_ACCOUNTS" -eq 1 ] && echo "    - system accounts locked (nologin shell + locked password)"
-    [ "$DO_LOG_PERMISSIONS" -eq 1 ] && echo "    - log file permissions (/var/log sweep + rsyslog create mode)"
+    [ "$DO_LOG_PERMISSIONS" -eq 1 ] && echo "    - log file permissions (/var/log sweep + rsyslog create mode + apt log hook)"
     [ "$DO_LOGROTATE_PERMS" -eq 1 ] && echo "    - logrotate permissions (rotated logs re-created 0640)"
     [ "$DO_AUDITD" -eq 1 ]           && echo "    - auditd: staged audit ruleset, enabled at boot"
     [ "$DO_HOME_PERMISSIONS" -eq 1 ] && echo "    - home directory permissions (750 + legacy credential dotfiles removed)"
