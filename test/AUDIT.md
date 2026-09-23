@@ -93,10 +93,15 @@ rkhunter installed, the property baseline present, and a daily check timer
 enabled. Every step since has kept the pattern — the audit grows a section
 when harden.sh grows a step, so the score always grades what the script
 actually promises — whatever the most recent step happens to be. Current
-score on a freshly hardened node:
+score on a freshly hardened node — **measured, not typed**: boot a node, plant
+the CI's offenders, run harden.sh **once** and audit. One pass on purpose: a
+second pass re-sweeps after the last apt run and hides drift a real server
+would show by its first nightly upgrade (that is how apt's reset of its own
+logs to 644 went unnoticed while this line said 160 and the node scored 164
+with 3 WARN — one of them a broken check of the audit itself):
 
 ```
- Score: 160 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 169 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty
