@@ -661,6 +661,22 @@ got=$(val s40 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s40 >/dev/null 2>&1
 
+echo "-- 41. Skip a step: --no-egress ------------------------------"
+fresh_node s41
+# Step 5 sets `default allow outgoing` (the natural offender): with the egress
+# step skipped that policy must survive and no ALLOW OUT rule may appear.
+docker exec s41 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-egress -y >/dev/null 2>&1
+docker exec s41 ufw status verbose 2>/dev/null | grep -q 'allow (outgoing)' \
+  && P "--no-egress -> the outbound policy stays allow (step skipped)" \
+  || F "--no-egress should leave the outbound policy open" "$(docker exec s41 ufw status verbose 2>/dev/null | grep -i default)"
+if docker exec s41 ufw status 2>/dev/null | grep -qE 'ALLOW OUT'; then
+  F "--no-egress should write no outbound allowlist" "ALLOW OUT rules present"; else
+  P "--no-egress -> no outbound allowlist rules written"; fi
+got=$(val s41 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s41 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \

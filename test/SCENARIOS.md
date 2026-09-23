@@ -58,8 +58,9 @@ cd test
 | 38 | `--no-suid-diet` | `chfn` keeps its shipped setuid bit (4755) and no `dpkg-statoverride` pin appears, the rest still applies |
 | 39 | `--no-process-limits` | no nproc drop-in is written and a login session of the admin user (`su -l`, the same `pam_limits` stack as sshd) stays `unlimited`, the rest still applies |
 | 40 | `--no-console-reboot` | `ctrl-alt-del.target` stays an alias of `reboot.target` and no `CtrlAltDelBurstAction` drop-in is written, the rest still applies |
+| 41 | `--no-egress` | the UFW outgoing policy stays `allow` and no `ALLOW OUT` rule is written, the rest still applies |
 
-**Result: 101/101 checks pass.**
+**Result: 104/104 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
