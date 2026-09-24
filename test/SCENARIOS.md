@@ -47,7 +47,7 @@ cd test
 | 27 | `--no-ssh-crypto` | no crypto drop-in is written and `sshd` still *offers* `hmac-sha1` (the stock negotiation lists survive), the rest still applies |
 | 28 | `--no-legacy-protocols` | a planted `telnet` client survives the run untouched (no other step purges packages), the rest still applies |
 | 29 | `--no-fs-protected` | planted `fs.protected_*=0` values survive and no `99-hardening-fs.conf` drop-in is written (no other step touches them), the rest still applies |
-| 30 | `--no-account-hygiene` | the planted NIS `+` entry, the hash sitting in `/etc/passwd` and the empty password all survive — pressing Enter still authenticates (behavioral, `nullok`) — while the rest still applies |
+| 30 | `--no-account-hygiene` | the planted NIS `+` entry, the hash sitting in `/etc/passwd` and the empty password all survive as data — and pressing Enter is still **refused**, because step 50 took `nullok` away (two independent layers; behavioral, pamtester) — while the rest still applies |
 | 31 | `--no-exploit-mitigations` | the planted `randomize_va_space=0` survives and no `99-hardening-exploit.conf` drop-in is written, the rest still applies (the scenario restores full ASLR itself: these sysctls are host-global) |
 | 32 | `--no-tmp-confinement` | a binary staged in `/tmp` still executes (the dropper's move must keep working with the step skipped), no `/tmp` entry lands in fstab, the rest still applies |
 | 33 | `--no-time-sync` | systemd-timesyncd stays uninstalled (the fresh node image has no time daemon — absence is the offender) and no timesyncd drop-in is written, the rest still applies |
@@ -61,7 +61,7 @@ cd test
 | 41 | `--no-egress` | the UFW outgoing policy stays `allow` and no `ALLOW OUT` rule is written, the rest still applies |
 | 42 | `--no-pam-nullok` | `nullok` survives on the `pam_unix` line of `common-auth` through the whole run (including the other PAM steps' `pam-auth-update` calls), the rest still applies |
 
-**Result: 107/107 checks pass.**
+**Result: 108/108 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
