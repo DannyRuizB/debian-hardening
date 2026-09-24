@@ -1067,11 +1067,14 @@ expect_ok "the migrated password still authenticates (moved, not broken)" \
 expect_line "the empty-password account is locked ('!') in /etc/shadow" '^!' \
   "sudo awk -F: '\$1 == \"dhnopw\" {print \$2}' /etc/shadow"
 # Behavioral crown: before hardening, pressing Enter WAS dhnopw's password
-# (measured); the lock must have closed that door.
+# (measured). Since step/role 50 two layers close that door - this lock AND
+# the removal of nullok - so the refusal below no longer tells them apart;
+# the '!' check right above is what proves THIS step, and the --no-account-
+# hygiene scenario proves the nullok layer holds on its own.
 if on_node "printf '\n' | sudo pamtester login dhnopw authenticate" >/dev/null 2>&1; then
-  fail "pressing Enter is no longer a password (empty-password account locked)"
+  fail "pressing Enter is no longer a password (account locked, and no nullok)"
 else
-  pass "pressing Enter is no longer a password (empty-password account locked)"
+  pass "pressing Enter is no longer a password (account locked, and no nullok)"
 fi
 
 echo "== Step 39: exploit mitigations =="
@@ -1384,6 +1387,35 @@ expect_line "the outbound reject rule counted those packets" '^ *[1-9][0-9]* +[0
 expect_ok "an allowlisted port still leaves the box (443/tcp out)" \
   bash -c "'timeout 20 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\"'"
 expect_ok "name resolution still works (53 allowed out)" getent hosts deb.debian.org
+
+echo "== Step 50: PAM nullok =="
+# Debian ships pam_unix with `nullok` (the natural offender - nothing to
+# plant): an account whose shadow field is EMPTY authenticates with no
+# password at all. Measured on debian:13: pamtester on the login stack
+# authenticates such an account without even prompting.
+expect_ok "pam_unix in common-auth carries no nullok" \
+  "! grep -Eq '^[^#]*pam_unix\.so.*[[:space:]]nullok([[:space:]]|\$)' /etc/pam.d/common-auth"
+# Behavioral, and on purpose AFTER hardening: step 38 locked the empties that
+# existed then; this account is emptied now, the way tomorrow's would be (an
+# admin's `passwd -d`). pamtester, not su: step 24's pam_wheel would refuse su
+# for the wrong reason. First a control - the same account WITH a password
+# authenticates, so a refusal below cannot hide a broken harness - then the
+# empty password must be refused.
+on_node "sudo userdel -r nullprobe 2>/dev/null; sudo useradd -m nullprobe && echo 'nullprobe:Null!Probe#Ctrl2026x' | sudo chpasswd && sudo faillock --user nullprobe --reset" >/dev/null 2>&1 || true
+if on_node "printf '%s\n' 'Null!Probe#Ctrl2026x' | sudo pamtester login nullprobe authenticate" >/dev/null 2>&1; then
+  pass "control: the probe account authenticates with its real password"
+else
+  fail "control: the probe account authenticates with its real password"
+fi
+on_node "sudo passwd -d nullprobe && sudo faillock --user nullprobe --reset" >/dev/null 2>&1 || true
+expect_line "the probe account's shadow field is now EMPTY" '^$' \
+  sudo bash -c "'getent shadow nullprobe | cut -d: -f2'"
+if on_node "printf '\n' | sudo pamtester login nullprobe authenticate" >/dev/null 2>&1; then
+  fail "an account with an EMPTY password is refused (no nullok)"
+else
+  pass "an account with an EMPTY password is refused (no nullok)"
+fi
+on_node "sudo faillock --user nullprobe --reset; sudo userdel -r nullprobe" >/dev/null 2>&1 || true
 
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
