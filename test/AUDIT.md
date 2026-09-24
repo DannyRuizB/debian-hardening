@@ -101,7 +101,7 @@ logs to 644 went unnoticed while this line said 160 and the node scored 164
 with 3 WARN — one of them a broken check of the audit itself):
 
 ```
- Score: 169 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 170 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty

@@ -279,6 +279,12 @@ jobs:
         run: |
           docker exec db-harden-node bash -c "echo \"outbound policy as shipped: \$(grep -h DEFAULT_OUTPUT_POLICY /etc/default/ufw 2>/dev/null || echo 'ufw not installed - nothing filters outbound')\""
 
+      # Step 50 has a natural offender: Debian ships pam_unix with nullok in
+      # common-auth. Nothing to plant - log the shipped line.
+      - name: Log the shipped pam_unix line step 50 will strip nullok from
+        run: |
+          docker exec db-harden-node bash -c "echo \"pam_unix as shipped: \$(grep pam_unix /etc/pam.d/common-auth)\""
+
       - name: Plant loosened apt trust gates for step 42 to override
         run: |
           docker exec db-harden-node bash -c '

@@ -232,6 +232,21 @@
 #      the daemon packages are named explicitly. Every other CIS 2.2
 #      server package (samba, nfs, bind, dhcp, ftp, snmp, squid, mail) is
 #      REPORTED by the audit, never removed: those are business decisions.
+#  45. Kernel attack surface: io_uring off, SysRq hotkeys off, no tty
+#      line-discipline autoload, no unprivileged user namespaces.
+#  46. SUID diet: chfn, chsh, gpasswd, newgrp and expiry lose their
+#      setuid/setgid bits, pinned with dpkg-statoverride so upgrades keep it.
+#  47. Per-session process limits: nproc 4096 for every non-root login, so
+#      a fork bomb dies small.
+#  48. Console reboot surface: ctrl-alt-del.target masked and the
+#      seven-press burst action off.
+#  49. Egress filtering: outbound REJECT with an allowlist (DNS, NTP,
+#      HTTP/S, DHCP); 22 and 25/587 closed on purpose.
+#  50. PAM nullok removed (CIS 5.3.3.4.1): Debian ships pam_unix with
+#      `nullok`, so an account whose password is EMPTY authenticates with
+#      no password at all. Step 38 locks the empties it finds today; this
+#      removes the rule that makes tomorrow's (a `passwd -d`, a package)
+#      a free login. pam-auth-update preserves the removal (measured).
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -299,6 +314,8 @@
 #   --no-egress            skip egress filtering (outbound stays wide open)
 #   --egress-allow N[/proto] extra outbound port to allow (repeatable), e.g.
 #                          22/tcp for git-over-SSH or 587/tcp for a mail relay
+#   --no-pam-nullok        skip removing `nullok` from pam_unix (an EMPTY
+#                          password stays a valid credential)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -361,6 +378,7 @@ DO_SUID_DIET=1
 DO_PROCESS_LIMITS=1
 DO_CONSOLE_REBOOT=1
 DO_EGRESS=1
+DO_PAM_NULLOK=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -452,6 +470,7 @@ parse_args() {
             --no-process-limits) DO_PROCESS_LIMITS=0; shift;;
             --no-console-reboot) DO_CONSOLE_REBOOT=0; shift;;
             --no-egress)       DO_EGRESS=0; shift;;
+            --no-pam-nullok)   DO_PAM_NULLOK=0; shift;;
             --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
@@ -3778,6 +3797,57 @@ setup_egress() {
 }
 
 
+# ---- Step 50: PAM nullok (CIS 5.3.3.4.1) ------------------------------------
+PAM_COMMON_AUTH=/etc/pam.d/common-auth
+
+setup_pam_nullok() {
+    [ "$DO_PAM_NULLOK" -eq 1 ] || { log "Skipping PAM nullok removal"; return 0; }
+    log "Removing nullok from pam_unix: an empty password is not a credential (CIS 5.3.3.4.1)"
+    # Debian's pam_unix line in common-auth carries `nullok`: an account whose
+    # shadow password field is EMPTY authenticates with no password at all.
+    # Measured on debian:13: an unprivileged user runs `su emptyacct -c id`
+    # and gets that account's shell without typing anything; pamtester on the
+    # login stack authenticates it without even prompting. Step 38 locks the
+    # empty accounts it finds at harden time - this removes the RULE, so the
+    # one that appears tomorrow (an admin's `passwd -d`, a package's useradd)
+    # is not a free login either.
+    #
+    # Where to cut, measured against the two things that rewrite PAM config:
+    #   - editing /usr/share/pam-configs/unix (the profile) lasts until
+    #     libpam-runtime is reinstalled/upgraded: the profile is not a
+    #     conffile, dpkg restores it and the postinst regenerates common-auth
+    #     with nullok back;
+    #   - editing common-auth itself SURVIVES a new PAM profile being enabled,
+    #     `pam-auth-update --force` and a libpam-runtime reinstall: the tool
+    #     records per-module option removals as local modifications and
+    #     re-applies them every time it regenerates the file (by design - see
+    #     the "local modifications" hash in /usr/sbin/pam-auth-update).
+    # So the cut goes in common-auth, and pam-auth-update --package runs
+    # right after to absorb it into its saved state.
+    if [ ! -f "$PAM_COMMON_AUTH" ]; then
+        warn "$PAM_COMMON_AUTH not found - nothing to change"
+        return 0
+    fi
+    if ! grep -Eq '^[^#]*pam_unix\.so.*[[:space:]]nullok([[:space:]]|$)' "$PAM_COMMON_AUTH"; then
+        ok "pam_unix in common-auth already refuses empty passwords (no nullok)"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would remove nullok from pam_unix in %s\n' "$c_yellow" "$c_reset" "$PAM_COMMON_AUTH"
+        return 0
+    fi
+    sed -i -E '/^[^#]*pam_unix\.so/ s/[[:space:]]+nullok([[:space:]]|$)/\1/' "$PAM_COMMON_AUTH"
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive pam-auth-update --package >/dev/null 2>&1 \
+            || warn "pam-auth-update could not absorb the nullok removal"
+    fi
+    if grep -Eq '^[^#]*pam_unix\.so.*[[:space:]]nullok([[:space:]]|$)' "$PAM_COMMON_AUTH"; then
+        warn "nullok is still on the pam_unix line in $PAM_COMMON_AUTH"
+    else
+        ok "Removed nullok from pam_unix: an empty password no longer authenticates"
+    fi
+}
+
 main() {
     require_root
     check_debian
@@ -3832,6 +3902,7 @@ main() {
     [ "$DO_PROCESS_LIMITS" -eq 1 ] && echo "    - per-session process cap (nproc 4096 for every non-root login; fork bombs die small)"
     [ "$DO_CONSOLE_REBOOT" -eq 1 ] && echo "    - console reboot surface closed (Ctrl+Alt+Del target masked, burst action off)"
     [ "$DO_EGRESS" -eq 1 ] && echo "    - egress filtering (outbound reject + allowlist: DNS, NTP, HTTP/S, DHCP)"
+    [ "$DO_PAM_NULLOK" -eq 1 ] && echo "    - PAM nullok removed (an empty password is never a valid credential)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3895,6 +3966,7 @@ main() {
     setup_process_limits
     setup_console_reboot
     setup_egress
+    setup_pam_nullok
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

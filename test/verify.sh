@@ -1385,6 +1385,35 @@ expect_ok "an allowlisted port still leaves the box (443/tcp out)" \
   bash -c "'timeout 20 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\"'"
 expect_ok "name resolution still works (53 allowed out)" getent hosts deb.debian.org
 
+echo "== Step 50: PAM nullok =="
+# Debian ships pam_unix with `nullok` (the natural offender - nothing to
+# plant): an account whose shadow field is EMPTY authenticates with no
+# password at all. Measured on debian:13: pamtester on the login stack
+# authenticates such an account without even prompting.
+expect_ok "pam_unix in common-auth carries no nullok" \
+  "! grep -Eq '^[^#]*pam_unix\.so.*[[:space:]]nullok([[:space:]]|\$)' /etc/pam.d/common-auth"
+# Behavioral, and on purpose AFTER hardening: step 38 locked the empties that
+# existed then; this account is emptied now, the way tomorrow's would be (an
+# admin's `passwd -d`). pamtester, not su: step 24's pam_wheel would refuse su
+# for the wrong reason. First a control - the same account WITH a password
+# authenticates, so a refusal below cannot hide a broken harness - then the
+# empty password must be refused.
+on_node "sudo userdel -r nullprobe 2>/dev/null; sudo useradd -m nullprobe && echo 'nullprobe:Null!Probe#Ctrl2026x' | sudo chpasswd && sudo faillock --user nullprobe --reset" >/dev/null 2>&1 || true
+if on_node "printf '%s\n' 'Null!Probe#Ctrl2026x' | sudo pamtester login nullprobe authenticate" >/dev/null 2>&1; then
+  pass "control: the probe account authenticates with its real password"
+else
+  fail "control: the probe account authenticates with its real password"
+fi
+on_node "sudo passwd -d nullprobe && sudo faillock --user nullprobe --reset" >/dev/null 2>&1 || true
+expect_line "the probe account's shadow field is now EMPTY" '^$' \
+  sudo bash -c "'getent shadow nullprobe | cut -d: -f2'"
+if on_node "printf '\n' | sudo pamtester login nullprobe authenticate" >/dev/null 2>&1; then
+  fail "an account with an EMPTY password is refused (no nullok)"
+else
+  pass "an account with an EMPTY password is refused (no nullok)"
+fi
+on_node "sudo faillock --user nullprobe --reset; sudo userdel -r nullprobe" >/dev/null 2>&1 || true
+
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
 # few attempts right after a (re)start while it catches up with the journal, so

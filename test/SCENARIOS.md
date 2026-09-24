@@ -59,8 +59,9 @@ cd test
 | 39 | `--no-process-limits` | no nproc drop-in is written and a login session of the admin user (`su -l`, the same `pam_limits` stack as sshd) stays `unlimited`, the rest still applies |
 | 40 | `--no-console-reboot` | `ctrl-alt-del.target` stays an alias of `reboot.target` and no `CtrlAltDelBurstAction` drop-in is written, the rest still applies |
 | 41 | `--no-egress` | the UFW outgoing policy stays `allow` and no `ALLOW OUT` rule is written, the rest still applies |
+| 42 | `--no-pam-nullok` | `nullok` survives on the `pam_unix` line of `common-auth` through the whole run (including the other PAM steps' `pam-auth-update` calls), the rest still applies |
 
-**Result: 104/104 checks pass.**
+**Result: 107/107 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

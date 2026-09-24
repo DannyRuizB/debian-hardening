@@ -677,6 +677,23 @@ got=$(val s41 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s41 >/dev/null 2>&1
 
+echo "-- 42. Skip a step: --no-pam-nullok --------------------------"
+fresh_node s42
+# Debian ships pam_unix with nullok (natural offender): with the step skipped
+# it must survive the whole run - including the pam-auth-update calls of the
+# faillock / faildelay / pwhistory steps, which regenerate common-auth.
+docker exec s42 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-pam-nullok -y >/dev/null 2>&1
+if docker exec s42 grep -Eq '^[^#]*pam_unix\.so.*[[:space:]]nullok([[:space:]]|$)' /etc/pam.d/common-auth 2>/dev/null; then
+  P "--no-pam-nullok -> pam_unix keeps nullok (step skipped)"; else
+  F "--no-pam-nullok should leave nullok on pam_unix" "$(docker exec s42 grep pam_unix /etc/pam.d/common-auth 2>/dev/null)"; fi
+docker exec s42 grep -q pam_faillock /etc/pam.d/common-auth 2>/dev/null \
+  && P "the other PAM steps still ran (pam_faillock wired into common-auth)" \
+  || F "the faillock step should still apply" "no pam_faillock in common-auth"
+got=$(val s42 permitrootlogin)
+[ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
+                || F "SSH hardening should still apply" "$got"
+docker rm -f s42 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
