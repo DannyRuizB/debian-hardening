@@ -1008,9 +1008,6 @@ expect_line "fs.protected_regular is 2 (the strong setting)" '^2$' sudo sysctl -
 expect_line "the fs-protection drop-in is present and root-owned 0644" '^644 root root$' \
   "sudo stat -c '%a %U %G' /etc/sysctl.d/99-hardening-fs.conf"
 
-# LAST on purpose: banning the client cuts our own SSH access to the node.
-# Lift the shield installed at the top — from here on we WANT to be bannable.
-docker exec db-harden-node fail2ban-client set sshd delignoreip 172.17.0.1 >/dev/null 2>&1 || true
 echo "== Step 34: password history (pam_pwhistory) =="
 expect_line "the pwhistory profile pins remember=24 with root enforced" 'pam_pwhistory\.so remember=24 use_authtok enforce_for_root' \
   grep pam_pwhistory /usr/share/pam-configs/hardening-pwhistory
@@ -1417,6 +1414,46 @@ else
 fi
 on_node "sudo faillock --user nullprobe --reset; sudo userdel -r nullprobe" >/dev/null 2>&1 || true
 
+echo "== Step 51: SSH host keys =="
+# What a CLIENT sees, not what the file says: sshd -T keeps listing the ECDSA
+# key as loaded (the CI planted a stray HostKey line for it, and HostKey
+# lines accumulate), so the proof is what the server OFFERS.
+expect_line "sshd effective config: hostkeyalgorithms pinned to ed25519 + rsa-sha2" \
+  '^hostkeyalgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com,rsa-sha2-512' sudo sshd -T
+expect_ok "sshd effective config: no ECDSA in hostkeyalgorithms" \
+  "! sudo sshd -T | grep -E '^hostkeyalgorithms ' | grep -q ecdsa"
+offered=$(ssh-keyscan -p "$PORT" 127.0.0.1 2>/dev/null | awk '{print $2}' | sort -u | tr '\n' ' ')
+echo "        host key types offered now: ${offered:-none}"
+if [[ " $offered " == *" ssh-ed25519 "* ]]; then pass "the server offers its ed25519 host key"; else fail "the server offers its ed25519 host key"; fi
+if [[ " $offered " == *"ecdsa"* ]]; then fail "the ECDSA host key is no longer served (despite the planted stray HostKey line)"
+else pass "the ECDSA host key is no longer served (despite the planted stray HostKey line)"; fi
+# Output captured first: ssh exits 255 here BY DESIGN, and under pipefail a
+# `ssh ... | grep -q` pipeline would fail even when grep matches.
+ecdsa_try=$(ssh -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -o HostKeyAlgorithms=ecdsa-sha2-nistp256 -o ConnectTimeout=5 -i "$KEY" opsadmin@127.0.0.1 true 2>&1 || true)
+if [[ "$ecdsa_try" == *"no matching host key type"* ]]; then
+  pass "a client that insists on ECDSA is refused at negotiation (no matching host key type)"
+else
+  fail "a client that insists on ECDSA is refused at negotiation (no matching host key type)"
+fi
+# Nothing regenerated: every key that existed keeps its fingerprint.
+if [ -s .ssh_ci/hostkeys-before.txt ]; then
+  after=$(on_node 'for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done' 2>/dev/null || true)
+  changed=0
+  while read -r _ fp _; do
+    [ -n "$fp" ] || continue
+    grep -qF "$fp" <<<"$after" || changed=$((changed + 1))
+  done < .ssh_ci/hostkeys-before.txt
+  if [ "$changed" -eq 0 ]; then pass "no host key was regenerated (every recorded fingerprint is still there)"
+  else fail "no host key was regenerated ($changed recorded fingerprint(s) gone)"; fi
+fi
+
+# LAST on purpose: banning the client cuts our own SSH access to the node.
+# Lift the shield installed at the top — from here on we WANT to be bannable.
+# (It used to sit before step 34's section; every section appended since ran
+# unshielded and passed by luck - step 51's deliberate ECDSA negotiation
+# failure is what finally tripped a ban mid-run.)
+docker exec db-harden-node fail2ban-client set sshd delignoreip 172.17.0.1 >/dev/null 2>&1 || true
 echo "== Fail2Ban really bans =="
 # Fire waves of failed logins until the ban lands. Fail2Ban can miss the first
 # few attempts right after a (re)start while it catches up with the journal, so

@@ -60,6 +60,7 @@ cd test
 | 40 | `--no-console-reboot` | `ctrl-alt-del.target` stays an alias of `reboot.target` and no `CtrlAltDelBurstAction` drop-in is written, the rest still applies |
 | 41 | `--no-egress` | the UFW outgoing policy stays `allow` and no `ALLOW OUT` rule is written, the rest still applies |
 | 42 | `--no-pam-nullok` | `nullok` survives on the `pam_unix` line of `common-auth` through the whole run (including the other PAM steps' `pam-auth-update` calls), the rest still applies |
+| 43 | `--no-ssh-hostkeys` | no host-key drop-in is written and `hostkeyalgorithms` still offers ECDSA, while the step-35 crypto drop-in is still there |
 
 **Result: 108/108 checks pass.**
 

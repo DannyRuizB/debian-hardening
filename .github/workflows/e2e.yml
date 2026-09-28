@@ -285,6 +285,19 @@ jobs:
         run: |
           docker exec db-harden-node bash -c "echo \"pam_unix as shipped: \$(grep pam_unix /etc/pam.d/common-auth)\""
 
+      # Step 51: the natural offender is the ECDSA nistp256 host key Debian
+      # generates and serves. Plant a stray `HostKey` line for it in the MAIN
+      # config too: HostKey lines accumulate (first-wins does not apply), so
+      # naming ed25519/RSA in a drop-in does NOT stop that key from being
+      # served (measured) - only the HostKeyAlgorithms pin does. Record the
+      # fingerprints, so verify can prove nothing was regenerated.
+      - name: Plant a stray ECDSA HostKey line and record the host keys for step 51
+        run: |
+          docker exec db-harden-node bash -c '
+            echo "HostKey /etc/ssh/ssh_host_ecdsa_key" >> /etc/ssh/sshd_config &&
+            for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done' | tee test/.ssh_ci/hostkeys-before.txt
+          echo "served as shipped: $(ssh-keyscan -p 2222 127.0.0.1 2>/dev/null | cut -d" " -f2 | sort -u | tr "\n" " ")"
+
       - name: Plant loosened apt trust gates for step 42 to override
         run: |
           docker exec db-harden-node bash -c '
