@@ -698,6 +698,24 @@ got=$(val s42 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s42 >/dev/null 2>&1
 
+echo "-- 43. Skip a step: --no-ssh-hostkeys ------------------------"
+fresh_node s43
+# Natural offender: Debian serves its ECDSA nistp256 host key. With the step
+# skipped nothing pins HostKeyAlgorithms, so it is still offered - and the
+# step-35 crypto policy (a different drop-in) still applies.
+docker exec s43 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ssh-hostkeys -y >/dev/null 2>&1
+if docker exec s43 test -e /etc/ssh/sshd_config.d/96-hardening-hostkeys.conf; then
+  F "--no-ssh-hostkeys should not write the host-key drop-in" "96-hardening-hostkeys.conf exists"
+elif docker exec s43 bash -c "sshd -T | grep -E '^hostkeyalgorithms ' | grep -q ecdsa"; then
+  P "--no-ssh-hostkeys -> ECDSA host keys stay offered (step skipped)"
+else
+  F "--no-ssh-hostkeys should leave the ECDSA host key served" "$(docker exec s43 sshd -T 2>/dev/null | grep '^hostkeyalgorithms ')"
+fi
+docker exec s43 test -f /etc/ssh/sshd_config.d/95-hardening-crypto.conf \
+  && P "the other SSH steps still ran (crypto policy drop-in present)" \
+  || F "the SSH crypto step should still apply" "no 95-hardening-crypto.conf"
+docker rm -f s43 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \

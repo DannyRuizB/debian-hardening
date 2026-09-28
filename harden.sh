@@ -247,6 +247,14 @@
 #      no password at all. Step 38 locks the empties it finds today; this
 #      removes the rule that makes tomorrow's (a `passwd -d`, a package)
 #      a free login. pam-auth-update preserves the removal (measured).
+#  51. SSH host keys (ssh-audit / CIS 5.1): the box proves its identity with
+#      ed25519 (and RSA only if it is 3072 bits or more) - the ECDSA
+#      nistp256 host key Debian generates stops being served, finishing
+#      what step 35 did for the key exchange. Nothing is regenerated: an
+#      existing key keeps its fingerprint, so no client sees a "changed"
+#      warning for a key it already trusts. A client that pinned ONLY the
+#      ECDSA key does (measured) - connect it once with UpdateHostKeys
+#      before running this, or re-scan with `ssh-keyscan -t ed25519`.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -316,6 +324,8 @@
 #                          22/tcp for git-over-SSH or 587/tcp for a mail relay
 #   --no-pam-nullok        skip removing `nullok` from pam_unix (an EMPTY
 #                          password stays a valid credential)
+#   --no-ssh-hostkeys      keep serving every host key sshd finds (ECDSA
+#                          nistp256 included)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -379,6 +389,7 @@ DO_PROCESS_LIMITS=1
 DO_CONSOLE_REBOOT=1
 DO_EGRESS=1
 DO_PAM_NULLOK=1
+DO_SSH_HOSTKEYS=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -471,6 +482,7 @@ parse_args() {
             --no-console-reboot) DO_CONSOLE_REBOOT=0; shift;;
             --no-egress)       DO_EGRESS=0; shift;;
             --no-pam-nullok)   DO_PAM_NULLOK=0; shift;;
+            --no-ssh-hostkeys) DO_SSH_HOSTKEYS=0; shift;;
             --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
@@ -3848,6 +3860,89 @@ setup_pam_nullok() {
     fi
 }
 
+# ---- Step 51: SSH host keys (ssh-audit / CIS 5.1) --------------------------
+SSH_HOSTKEYS_DROPIN=/etc/ssh/sshd_config.d/96-hardening-hostkeys.conf
+
+setup_ssh_hostkeys() {
+    [ "$DO_SSH_HOSTKEYS" -eq 1 ] || { log "Skipping SSH host key policy"; return 0; }
+    log "Pinning the SSH host keys: ed25519 (+ RSA >= 3072), no ECDSA nistp256"
+    # Step 35 took the NIST P-curves out of the key exchange; the host still
+    # PROVES its identity with one. Measured on a fresh debian:13 node:
+    # openssh-server generates rsa (3072), ecdsa (nistp256) and ed25519 host
+    # keys and serves all three (ssh-keyscan: ecdsa-sha2-nistp256, ssh-rsa,
+    # ssh-ed25519). This serves ed25519, plus RSA (rsa-sha2-* signatures
+    # only) when the key is at least 3072 bits.
+    #
+    # Nothing is regenerated - that is the whole design. A regenerated key is
+    # a new fingerprint, and every client that trusted the old one sees
+    # "REMOTE HOST IDENTIFICATION HAS CHANGED". So an RSA key under 3072
+    # bits (old images made 2048) is simply not served, and only a MISSING
+    # ed25519 key is created (clients that do not know it yet negotiate the
+    # RSA key they do know, or learn it through UpdateHostKeys).
+    #
+    # The one client this does bite, measured: one whose known_hosts holds
+    # ONLY the ECDSA key (an OpenSSH before 8.5 preferred ECDSA; or a
+    # known_hosts built with `ssh-keyscan -t ecdsa`). It gets the "changed"
+    # warning and rc 255 in BatchMode - an identity change it did not ask
+    # for, not an attack. Connecting it ONCE before this runs, with
+    # UpdateHostKeys (the default on modern clients), makes the server hand
+    # over its other keys; after the change it connects cleanly (measured).
+    #
+    # HostKey lines ACCUMULATE across the config (unlike most keywords,
+    # where the first occurrence wins), and naming them here stops sshd from
+    # loading its default set - measured: the ECDSA key is no longer offered
+    # even to a client that asks for it. HostKeyAlgorithms pins the same
+    # thing on the signature side, so a stray HostKey line elsewhere cannot
+    # bring an ECDSA identity back.
+    local ed=/etc/ssh/ssh_host_ed25519_key rsa=/etc/ssh/ssh_host_rsa_key bits=0 content
+    if ! command -v sshd >/dev/null 2>&1; then
+        warn "sshd not installed - SSH host key policy skipped"
+        return 0
+    fi
+    if [ -f "$rsa.pub" ]; then
+        bits=$(ssh-keygen -lf "$rsa.pub" 2>/dev/null | awk '{print $1}')
+        [[ "$bits" =~ ^[0-9]+$ ]] || bits=0
+    fi
+    content="# Managed by debian-hardening (harden.sh). Edit flags, not this file.
+# Host identity: ed25519, plus RSA only at 3072 bits or more. No ECDSA.
+HostKey $ed"
+    local algs="ssh-ed25519,ssh-ed25519-cert-v01@openssh.com"
+    if [ "$bits" -ge 3072 ]; then
+        content="$content
+HostKey $rsa"
+        algs="$algs,rsa-sha2-512,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256,rsa-sha2-256-cert-v01@openssh.com"
+    elif [ -f "$rsa" ]; then
+        warn "the RSA host key is $bits bits - not served (under 3072), and NOT regenerated (clients would see a changed identity)"
+    fi
+    content="$content
+HostKeyAlgorithms $algs"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        [ -f "$ed" ] || printf '    %s(dry-run)%s would generate the missing %s\n' "$c_yellow" "$c_reset" "$ed"
+        printf '    %s(dry-run)%s would write %s:\n' "$c_yellow" "$c_reset" "$SSH_HOSTKEYS_DROPIN"
+        printf '%s\n' "$content" | sed 's/^/        /'
+        return 0
+    fi
+    if [ ! -f "$ed" ]; then
+        ssh-keygen -q -t ed25519 -N '' -f "$ed" || { err "could not generate $ed - host key policy not applied"; return 1; }
+        ok "generated the missing ed25519 host key"
+    fi
+    if [ -f "$SSH_HOSTKEYS_DROPIN" ] && [ "$(cat "$SSH_HOSTKEYS_DROPIN")" = "$content" ]; then
+        ok "SSH host key policy already in place"
+        return 0
+    fi
+    install -d -m 755 /etc/ssh/sshd_config.d
+    printf '%s\n' "$content" > "$SSH_HOSTKEYS_DROPIN"
+    chmod 644 "$SSH_HOSTKEYS_DROPIN"
+    if sshd -t 2>/dev/null; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+        ok "sshd proves its identity with ed25519$([ "$bits" -ge 3072 ] && echo " and RSA-$bits") only"
+        warn "a client that pinned ONLY this box's ECDSA key will now see a changed identity - see step 51 in the README"
+    else
+        rm -f "$SSH_HOSTKEYS_DROPIN"
+        err "sshd config validation failed after pinning the host keys - reverted"
+    fi
+}
+
 main() {
     require_root
     check_debian
@@ -3903,6 +3998,7 @@ main() {
     [ "$DO_CONSOLE_REBOOT" -eq 1 ] && echo "    - console reboot surface closed (Ctrl+Alt+Del target masked, burst action off)"
     [ "$DO_EGRESS" -eq 1 ] && echo "    - egress filtering (outbound reject + allowlist: DNS, NTP, HTTP/S, DHCP)"
     [ "$DO_PAM_NULLOK" -eq 1 ] && echo "    - PAM nullok removed (an empty password is never a valid credential)"
+    [ "$DO_SSH_HOSTKEYS" -eq 1 ] && echo "    - SSH host keys: ed25519 (+ RSA >= 3072), no ECDSA nistp256"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -3967,6 +4063,7 @@ main() {
     setup_console_reboot
     setup_egress
     setup_pam_nullok
+    setup_ssh_hostkeys
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
