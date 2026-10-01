@@ -716,6 +716,26 @@ docker exec s43 test -f /etc/ssh/sshd_config.d/95-hardening-crypto.conf \
   || F "the SSH crypto step should still apply" "no 95-hardening-crypto.conf"
 docker rm -f s43 >/dev/null 2>&1
 
+echo "-- 44. Skip a step: --no-sudo-timestamp ----------------------"
+fresh_node s44
+# Debian's own cache is already per-tty, so the offender is planted (as in
+# the e2e): a global, never-expiring window. With the step skipped it must
+# still be the policy in effect, and step 10's sudo drop-in still written.
+docker exec s44 bash -c 'printf "Defaults timestamp_type=global\nDefaults timestamp_timeout=-1\n" > /etc/sudoers.d/40-ci-convenience && chmod 440 /etc/sudoers.d/40-ci-convenience'
+docker exec s44 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-sudo-timestamp -y >/dev/null 2>&1
+eff=$(docker exec s44 sudo -V 2>/dev/null | grep -E '^(Authentication timestamp timeout|Type of authentication timestamp record):' | tr '\n' ' ')
+if docker exec s44 test -e /etc/sudoers.d/99-hardening-timestamp; then
+  F "--no-sudo-timestamp should not write the timestamp drop-in" "99-hardening-timestamp exists"
+elif [[ "$eff" == *"timeout: -1.0 minutes"* && "$eff" == *"record: global"* ]]; then
+  P "--no-sudo-timestamp -> the planted global, never-expiring cache stays in effect (step skipped)"
+else
+  F "--no-sudo-timestamp should leave the planted cache policy in effect" "$eff"
+fi
+docker exec s44 test -f /etc/sudoers.d/99-hardening-sudo \
+  && P "the other sudo step still ran (use_pty + logfile drop-in present)" \
+  || F "the sudo hardening step should still apply" "no 99-hardening-sudo"
+docker rm -f s44 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
