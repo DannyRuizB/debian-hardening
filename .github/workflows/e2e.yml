@@ -322,6 +322,26 @@ jobs:
             --admin-user opsadmin \
             --pubkey "$(cat test/.ssh_ci/id_ci.pub)" -y
 
+      # The audit used to be run by hand, so test/AUDIT.md quoted whatever the
+      # last local run said (171 while step 52 had added a check). Now the CI
+      # measures it - after ONE pass, before the second: AUDIT.md explains why
+      # one (a second pass hides the drift a real server shows after its first
+      # nightly upgrade). No FAIL is allowed, and the documented score must be
+      # the measured one, so the number in the docs can't go stale again.
+      - name: "Audit after one pass (no FAIL, and AUDIT.md must quote this score)"
+        run: |
+          out=$(./test/audit.sh 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+          echo "$out"
+          measured=$(grep -E '^ Score: ' <<<"$out")
+          documented=$(grep -E '^ Score: ' test/AUDIT.md | tail -1)
+          if grep -qE '^  FAIL ' <<<"$out"; then
+            echo "::error::the audit has FAIL items on a freshly hardened node"; exit 1
+          fi
+          if [ "$measured" != "$documented" ]; then
+            echo "::error::test/AUDIT.md quotes '$documented' but the audit measured '$measured'"; exit 1
+          fi
+          echo "AUDIT.md agrees with the measurement: $measured"
+
       - name: "Second pass: idempotence (config files must not change)"
         run: |
           files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab /usr/share/pam-configs/hardening-pwhistory /etc/pam.d/common-password /etc/security/opasswd /etc/ssh/sshd_config.d/95-hardening-crypto.conf /etc/sysctl.d/99-hardening-fs.conf /etc/shadow /etc/group /etc/sysctl.d/99-hardening-exploit.conf /etc/systemd/timesyncd.conf.d/99-hardening.conf /etc/apt/apt.conf.d/99-hardening-apt-trust /etc/apt/apt.conf.d/99-hardening-logperms /etc/sysctl.d/99-hardening-kernel-surface.conf /var/lib/dpkg/statoverride /etc/security/limits.d/99-hardening-nproc.conf /etc/systemd/system/ctrl-alt-del.target /etc/systemd/system.conf.d/99-hardening-ctrlaltdel.conf /etc/default/ufw /etc/ufw/user.rules /etc/ufw/user6.rules /etc/ssh/sshd_config.d/96-hardening-hostkeys.conf /etc/sudoers.d/99-hardening-timestamp"
@@ -347,5 +367,12 @@ jobs:
       # Independent of the node above: hardens fresh throwaway containers with
       # different flag sets and asserts each behaves (lockout guard, custom
       # port, extra ports, skipping a step).
+      # Same guard for the scenario count test/SCENARIOS.md quotes (it said
+      # 108 while the suite ran 112).
       - name: Scenario tests (flag behaviour)
-        run: ./test/scenarios.sh
+        run: |
+          out=$(./test/scenarios.sh 2>&1 | sed 's/\x1b\[[0-9;]*m//g') || { echo "$out"; exit 1; }
+          echo "$out"
+          n=$(grep -oE '^ [0-9]+/[0-9]+ scenario checks passed' <<<"$out" | grep -oE '[0-9]+/[0-9]+')
+          grep -qF "**Result: $n checks pass.**" test/SCENARIOS.md \
+            || { echo "::error::test/SCENARIOS.md does not quote the measured $n"; exit 1; }
