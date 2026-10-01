@@ -63,7 +63,7 @@ cd test
 | 43 | `--no-ssh-hostkeys` | no host-key drop-in is written and `hostkeyalgorithms` still offers ECDSA, while the step-35 crypto drop-in is still there |
 | 44 | `--no-sudo-timestamp` | no timestamp drop-in is written and the planted `timestamp_type=global` + `timestamp_timeout=-1` stay in effect (`sudo -V`), while step 10's sudo drop-in is still there |
 
-**Result: 108/108 checks pass.**
+**Result: 112/112 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
