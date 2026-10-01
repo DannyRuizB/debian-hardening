@@ -255,6 +255,13 @@
 #      warning for a key it already trusts. A client that pinned ONLY the
 #      ECDSA key does (measured) - connect it once with UpdateHostKeys
 #      before running this, or re-scan with `ssh-keyscan -t ed25519`.
+#  52. Sudo credential cache (CIS 5.2.6): the password a user types for sudo
+#      opens a 5-minute window (Debian: 15) for THAT terminal only -
+#      timestamp_type=tty pinned, so a `timestamp_type=global` from some
+#      other drop-in can't hand the window to every process of the user
+#      (measured: a background job with no tty and a second pty both ran
+#      sudo without a password), and a `timestamp_timeout=-1` can't make it
+#      eternal.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -326,6 +333,8 @@
 #                          password stays a valid credential)
 #   --no-ssh-hostkeys      keep serving every host key sshd finds (ECDSA
 #                          nistp256 included)
+#   --no-sudo-timestamp    leave sudo's credential cache as configured
+#                          (window length and per-tty scope)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
 #   --dry-run              print what would change, do nothing
@@ -390,6 +399,7 @@ DO_CONSOLE_REBOOT=1
 DO_EGRESS=1
 DO_PAM_NULLOK=1
 DO_SSH_HOSTKEYS=1
+DO_SUDO_TIMESTAMP=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -483,6 +493,7 @@ parse_args() {
             --no-egress)       DO_EGRESS=0; shift;;
             --no-pam-nullok)   DO_PAM_NULLOK=0; shift;;
             --no-ssh-hostkeys) DO_SSH_HOSTKEYS=0; shift;;
+            --no-sudo-timestamp) DO_SUDO_TIMESTAMP=0; shift;;
             --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
@@ -3943,6 +3954,57 @@ HostKeyAlgorithms $algs"
     fi
 }
 
+# ---- Step 52: sudo credential cache (CIS 5.2.6) -----------------------------
+SUDO_TIMESTAMP_DROPIN=/etc/sudoers.d/99-hardening-timestamp
+SUDO_TIMESTAMP_MINUTES=5
+
+setup_sudo_timestamp() {
+    [ "$DO_SUDO_TIMESTAMP" -eq 1 ] || { log "Skipping sudo credential cache policy"; return 0; }
+    log "Pinning sudo's credential cache: ${SUDO_TIMESTAMP_MINUTES} minutes, per terminal (CIS 5.2.6)"
+    # After a successful password, sudo caches the credential: for the next
+    # timestamp_timeout minutes the user runs sudo again without typing it.
+    # WHO shares that window is timestamp_type. Measured on debian:13 (sudo
+    # 1.9.16p2): the default is `tty`, 15 minutes - a second pty of the same
+    # user, or a job of theirs with no tty at all, is asked again. One
+    # `Defaults timestamp_type=global` in any drop-in (a convenience copied
+    # from a forum, a package) and authenticating ONCE lets every process of
+    # that user run sudo without a password: the background job and the
+    # second pty both did. `timestamp_timeout=-1` makes the window never
+    # close. sudoers is last-match-wins and sudoers.d is read in lexical
+    # order after the main file, so a 99- drop-in has the final word over
+    # what came before it; `sudo -V` (as root) prints the value in effect.
+    local content
+    content=$(printf 'Defaults timestamp_type=tty\nDefaults timestamp_timeout=%s\n' "$SUDO_TIMESTAMP_MINUTES")
+    if [ -f "$SUDO_TIMESTAMP_DROPIN" ] && [ "$(cat "$SUDO_TIMESTAMP_DROPIN")" = "$content" ]; then
+        ok "sudo credential cache already pinned (tty, ${SUDO_TIMESTAMP_MINUTES} min)"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s: Defaults timestamp_type=tty + timestamp_timeout=%s\n' "$c_yellow" "$c_reset" "$SUDO_TIMESTAMP_DROPIN" "$SUDO_TIMESTAMP_MINUTES"
+        return 0
+    fi
+    local tmp
+    tmp=$(mktemp)
+    printf '%s\n' "$content" > "$tmp"
+    # Validated before it goes live, like every sudoers change here: a bad
+    # drop-in must never take sudo down with it.
+    if visudo -cf "$tmp" >/dev/null 2>&1; then
+        install -m 440 -o root -g root "$tmp" "$SUDO_TIMESTAMP_DROPIN"
+        rm -f "$tmp"
+    else
+        rm -f "$tmp"
+        err "Generated sudoers drop-in failed visudo validation - not installing"
+        return 1
+    fi
+    local effective
+    effective=$(sudo -V 2>/dev/null | grep -E '^(Authentication timestamp timeout|Type of authentication timestamp record):' | tr '\n' ' ')
+    if [[ "$effective" == *"timeout: ${SUDO_TIMESTAMP_MINUTES}.0 minutes"* ]] && [[ "$effective" == *"record: tty"* ]]; then
+        ok "sudo asks again after ${SUDO_TIMESTAMP_MINUTES} minutes, and never shares the window across terminals"
+    else
+        warn "a later sudoers file overrides the credential cache policy: ${effective:-sudo -V unreadable}"
+    fi
+}
+
 main() {
     require_root
     check_debian
@@ -3999,6 +4061,7 @@ main() {
     [ "$DO_EGRESS" -eq 1 ] && echo "    - egress filtering (outbound reject + allowlist: DNS, NTP, HTTP/S, DHCP)"
     [ "$DO_PAM_NULLOK" -eq 1 ] && echo "    - PAM nullok removed (an empty password is never a valid credential)"
     [ "$DO_SSH_HOSTKEYS" -eq 1 ] && echo "    - SSH host keys: ed25519 (+ RSA >= 3072), no ECDSA nistp256"
+    [ "$DO_SUDO_TIMESTAMP" -eq 1 ] && echo "    - sudo credential cache: ${SUDO_TIMESTAMP_MINUTES} minutes, per terminal"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -4064,6 +4127,7 @@ main() {
     setup_egress
     setup_pam_nullok
     setup_ssh_hostkeys
+    setup_sudo_timestamp
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
