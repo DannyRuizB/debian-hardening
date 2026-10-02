@@ -262,6 +262,14 @@
 #      (measured: a background job with no tty and a second pty both ran
 #      sudo without a password), and a `timestamp_timeout=-1` can't make it
 #      eternal.
+#  53. Loopback isolation: 127.0.0.0/8 lives on lo and never on the wire.
+#      With route_localnet=1 (kube-proxy sets it; it is an OR of `all` and
+#      the interface) a LAN neighbour that routes 127.0.0.1 via this box
+#      reaches every service bound to localhost - measured: a UDP write to
+#      a 127.0.0.1-only listener arrived, and under ufw with a trusted-LAN
+#      rule too. route_localnet pinned to 0 (all/default) AND a ufw
+#      before.rules DROP for non-lo traffic to/from 127.0.0.0/8, which
+#      holds even when something flips route_localnet back on later.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -334,6 +342,7 @@
 #   --no-ssh-hostkeys      keep serving every host key sshd finds (ECDSA
 #                          nistp256 included)
 #   --no-sudo-timestamp    leave sudo's credential cache as configured
+#   --no-loopback-isolation leave route_localnet and the loopback firewall rules alone
 #                          (window length and per-tty scope)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
@@ -400,6 +409,7 @@ DO_EGRESS=1
 DO_PAM_NULLOK=1
 DO_SSH_HOSTKEYS=1
 DO_SUDO_TIMESTAMP=1
+DO_LOOPBACK=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -494,6 +504,7 @@ parse_args() {
             --no-pam-nullok)   DO_PAM_NULLOK=0; shift;;
             --no-ssh-hostkeys) DO_SSH_HOSTKEYS=0; shift;;
             --no-sudo-timestamp) DO_SUDO_TIMESTAMP=0; shift;;
+            --no-loopback-isolation) DO_LOOPBACK=0; shift;;
             --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
@@ -4005,6 +4016,74 @@ setup_sudo_timestamp() {
     fi
 }
 
+# ---- Step 53: loopback isolation ---------------------------------------------
+LOOPBACK_SYSCTL=/etc/sysctl.d/99-hardening-loopback.conf
+LOOPBACK_UFW_RULES=/etc/ufw/before.rules
+LOOPBACK_MARK='# harden.sh loopback isolation: 127.0.0.0/8 lives on lo, never on the wire'
+
+setup_loopback_isolation() {
+    [ "$DO_LOOPBACK" -eq 1 ] || { log "Skipping loopback isolation"; return 0; }
+    log "Isolating the loopback: nothing on the network reaches 127.0.0.0/8"
+    # A service bound to 127.0.0.1 - Redis, a database, an admin panel, the
+    # Docker API on 2375 - is "safe because it is localhost". That holds only
+    # while the kernel refuses 127.0.0.0/8 as a destination off lo, which is
+    # what route_localnet=0 means. kube-proxy sets it to 1 (NodePorts on
+    # localhost), and the knob is an OR of `all` and the interface. Measured
+    # in a netns pair: a neighbour that routes 127.0.0.1 via this box wrote
+    # to a UDP listener bound to 127.0.0.1 with route_localnet=1 (all=0 +
+    # eth0=1 too), not with 0; under ufw default-deny it only reached ports
+    # ufw allows - but with the everyday "trust my LAN" rule (ufw allow from
+    # <subnet>) it reached everything on localhost. Two layers:
+    #   1. route_localnet = 0 for all/default, persisted. Interfaces already
+    #      at 1 are named, not flipped: whatever set them did it on purpose
+    #      and would set them again.
+    #   2. a DROP in ufw's before.rules, right after the lo ACCEPT, for
+    #      non-lo traffic TO and FROM 127.0.0.0/8 - it holds whatever
+    #      route_localnet says later (measured: with the rule, the same write
+    #      is dropped and the rule's counter shows it; local traffic on lo is
+    #      untouched). IPv6 has no such knob: ::1 is never accepted off lo.
+    local content
+    content=$(printf '%s\n%s\n%s\n' \
+        '# Managed by harden.sh (loopback isolation step). Edit the script, not this file.' \
+        'net.ipv4.conf.all.route_localnet = 0' \
+        'net.ipv4.conf.default.route_localnet = 0')
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s (route_localnet = 0) and add a loopback DROP to %s\n' \
+            "$c_yellow" "$c_reset" "$LOOPBACK_SYSCTL" "$LOOPBACK_UFW_RULES"
+        return 0
+    fi
+    if [ -f "$LOOPBACK_SYSCTL" ] && [ "$(cat "$LOOPBACK_SYSCTL")" = "$content" ]; then
+        ok "route_localnet already pinned to 0"
+    else
+        printf '%s\n' "$content" > "$LOOPBACK_SYSCTL"
+        sysctl -q -p "$LOOPBACK_SYSCTL" >/dev/null 2>&1 || true
+        ok "route_localnet pinned to 0 (all/default, persisted in $LOOPBACK_SYSCTL)"
+    fi
+    local f iface
+    for f in /proc/sys/net/ipv4/conf/*/route_localnet; do
+        [ -r "$f" ] || continue
+        iface=${f#/proc/sys/net/ipv4/conf/}; iface=${iface%/route_localnet}
+        case "$iface" in all|default) continue;; esac
+        [ "$(cat "$f")" = "1" ] && warn "interface $iface has route_localnet=1 (something set it on purpose) - left alone; the firewall rule below covers it"
+    done
+    if [ "$DO_UFW" -ne 1 ] || [ ! -f "$LOOPBACK_UFW_RULES" ]; then
+        warn "Loopback firewall rule needs the firewall step - only the route_localnet pin applied"
+        return 0
+    fi
+    if grep -qxF "$LOOPBACK_MARK" "$LOOPBACK_UFW_RULES"; then
+        ok "loopback DROP already in $LOOPBACK_UFW_RULES"
+        return 0
+    fi
+    if ! grep -qx -- '-A ufw-before-input -i lo -j ACCEPT' "$LOOPBACK_UFW_RULES"; then
+        warn "no '-A ufw-before-input -i lo -j ACCEPT' line in $LOOPBACK_UFW_RULES to anchor on - firewall rule not added"
+        return 0
+    fi
+    sed -i "/^-A ufw-before-input -i lo -j ACCEPT\$/a $LOOPBACK_MARK\\n-A ufw-before-input ! -i lo -d 127.0.0.0/8 -j DROP\\n-A ufw-before-input ! -i lo -s 127.0.0.0/8 -j DROP" "$LOOPBACK_UFW_RULES"
+    ufw reload >/dev/null 2>&1 || true
+    ok "ufw drops non-loopback traffic to and from 127.0.0.0/8 (before.rules, live)"
+    ok "A service bound to localhost stays local even if route_localnet is turned back on"
+}
+
 main() {
     require_root
     check_debian
@@ -4062,6 +4141,7 @@ main() {
     [ "$DO_PAM_NULLOK" -eq 1 ] && echo "    - PAM nullok removed (an empty password is never a valid credential)"
     [ "$DO_SSH_HOSTKEYS" -eq 1 ] && echo "    - SSH host keys: ed25519 (+ RSA >= 3072), no ECDSA nistp256"
     [ "$DO_SUDO_TIMESTAMP" -eq 1 ] && echo "    - sudo credential cache: ${SUDO_TIMESTAMP_MINUTES} minutes, per terminal"
+    [ "$DO_LOOPBACK" -eq 1 ] && echo "    - loopback isolation (route_localnet = 0 + ufw DROP for 127.0.0.0/8 off lo)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -4128,6 +4208,7 @@ main() {
     setup_pam_nullok
     setup_ssh_hostkeys
     setup_sudo_timestamp
+    setup_loopback_isolation
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
