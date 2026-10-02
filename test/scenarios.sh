@@ -736,6 +736,25 @@ docker exec s44 test -f /etc/sudoers.d/99-hardening-sudo \
   || F "the sudo hardening step should still apply" "no 99-hardening-sudo"
 docker rm -f s44 >/dev/null 2>&1
 
+echo "-- 45. Skip a step: --no-loopback-isolation ------------------"
+fresh_node s45
+# The offender is planted as kube-proxy plants it; with the step skipped it
+# must survive, there must be no loopback rule, and step 5's firewall must
+# still be up.
+docker exec s45 sysctl -qw net.ipv4.conf.all.route_localnet=1
+docker exec s45 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-loopback-isolation -y >/dev/null 2>&1
+if docker exec s45 test -e /etc/sysctl.d/99-hardening-loopback.conf || docker exec s45 grep -q 'loopback isolation' /etc/ufw/before.rules; then
+  F "--no-loopback-isolation should write neither the sysctl drop-in nor the ufw rule" "found one of them"
+elif [ "$(docker exec s45 sysctl -n net.ipv4.conf.all.route_localnet)" = "1" ]; then
+  P "--no-loopback-isolation -> the planted route_localnet=1 stays, no loopback rule (step skipped)"
+else
+  F "--no-loopback-isolation should leave the planted route_localnet=1" "$(docker exec s45 sysctl -n net.ipv4.conf.all.route_localnet)"
+fi
+docker exec s45 ufw status 2>/dev/null | grep -q 'Status: active' \
+  && P "the firewall step still ran (ufw active)" \
+  || F "the firewall step should still apply" "ufw not active"
+docker rm -f s45 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
