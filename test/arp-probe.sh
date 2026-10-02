@@ -48,7 +48,9 @@ atk_ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net1\").IPAddr
 
 replies=$(docker exec "$ATK" sh -c "arping -c 2 -w 3 -I eth0 $ip2 2>/dev/null" | grep -c 'reply from')
 docker exec "$NODE" ip neigh flush dev eth0 >/dev/null 2>&1
-docker exec -d "$ATK" sh -c 'timeout 8 tcpdump -lni eth0 -c 1 "arp and arp[6:2] == 1 and arp[24:4] != 0" > /tmp/arp.txt 2>/dev/null'
+# Only requests the NODE sends (sender = one of its two addresses): the Docker
+# gateway ARPs on the same segment and was once captured instead.
+docker exec -d "$ATK" sh -c "timeout 8 tcpdump -lni eth0 -c 1 'arp and arp[6:2] == 1 and (arp src host $ip1 or arp src host $ip2)' > /tmp/arp.txt 2>/dev/null"
 sleep 1
 # A helper sharing the node's network namespace (same interfaces, same
 # sysctls - what is being measured) sends one UDP datagram to 123 from the
