@@ -927,6 +927,14 @@ echo "-- ARP flux -------------------------------------------------"
   && P "arp_announce = 2 (ARP requests carry the interface's own address)" \
   || F "arp_announce = $(on_node sysctl -n net.ipv4.conf.all.arp_announce): ARP requests can announce another network's address" "pin net.ipv4.conf.all.arp_announce=2 (ARP flux step)"
 
+echo "-- ARP spoofing guard ---------------------------------------"
+[ "$(on_node sysctl -n net.ipv4.conf.all.drop_gratuitous_arp)" = "1" ] \
+  && P "drop_gratuitous_arp = 1 (unsolicited ARP replies cannot poison the cache)" \
+  || F "drop_gratuitous_arp = $(on_node sysctl -n net.ipv4.conf.all.drop_gratuitous_arp): a broadcast gratuitous ARP can overwrite a cache entry" "pin net.ipv4.conf.all.drop_gratuitous_arp=1 (ARP spoofing-guard step)"
+[ "$(on_node sysctl -n net.ipv4.conf.all.arp_filter)" = "1" ] \
+  && P "arp_filter = 1 (each interface answers only for the address that lives on it)" \
+  || F "arp_filter = $(on_node sysctl -n net.ipv4.conf.all.arp_filter): one segment can farm the MACs of another's addresses" "pin net.ipv4.conf.all.arp_filter=1 (ARP spoofing-guard step)"
+
 echo "-- Accounts & files -----------------------------------------"
 on_node getent group sudo | grep -qE ':.*[a-z]' \
   && P "A non-root sudo account exists ($(on_node getent group sudo | sed 's/.*://'))" \

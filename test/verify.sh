@@ -1534,6 +1534,12 @@ else
   fail "a two-network node gives neither address away on the other network ($arp_res)"
 fi
 
+echo "== Step 55: ARP spoofing guard =="
+expect_line "drop_gratuitous_arp is 1 (unsolicited ARP replies are dropped)" '^1$' \
+  sudo sysctl -n net.ipv4.conf.all.drop_gratuitous_arp
+expect_line "arp_filter is 1 (an interface answers only for its own address)" '^1$' \
+  sudo sysctl -n net.ipv4.conf.all.arp_filter
+
 # LAST on purpose: banning the client cuts our own SSH access to the node.
 # Lift the shield installed at the top — from here on we WANT to be bannable.
 # (It used to sit before step 34's section; every section appended since ran
