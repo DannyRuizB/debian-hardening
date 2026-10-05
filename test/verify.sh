@@ -1517,6 +1517,23 @@ else
   fail "a neighbour routing 127.0.0.1 via the node gets no answer from its loopback sshd ($lo_res)"
 fi
 
+echo "== Step 54: ARP flux =="
+expect_line "arp_ignore is 1 (answer ARP only for the interface asked)" '^1$' \
+  sudo sysctl -n net.ipv4.conf.all.arp_ignore
+expect_line "arp_announce is 2 (announce the interface's own address)" '^2$' \
+  sudo sysctl -n net.ipv4.conf.all.arp_announce
+# Behavioural: a second network is attached for the probe and removed after.
+# The e2e measured LEAKS before hardening; here neither leak may show, and the
+# node's request must carry its eth0 address (a probe that saw no request at
+# all is SETUP-FAILED, not a pass).
+arp_res=$(./arp-probe.sh db-harden-node)
+echo "        ARP probe: $arp_res"
+if [[ "$arp_res" == RESULT=CLEAN* ]]; then
+  pass "a two-network node gives neither address away on the other network (no reply, own sender IP)"
+else
+  fail "a two-network node gives neither address away on the other network ($arp_res)"
+fi
+
 # LAST on purpose: banning the client cuts our own SSH access to the node.
 # Lift the shield installed at the top — from here on we WANT to be bannable.
 # (It used to sit before step 34's section; every section appended since ran

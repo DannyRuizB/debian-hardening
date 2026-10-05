@@ -270,6 +270,10 @@
 #      rule too. route_localnet pinned to 0 (all/default) AND a ufw
 #      before.rules DROP for non-lo traffic to/from 127.0.0.0/8, which
 #      holds even when something flips route_localnet back on later.
+#  54. ARP flux: a box on two networks gives its address on one away on the
+#      other - measured: with Linux's 0/0 it answers ARP on eth0 for its
+#      eth1 address and asks "tell <eth1 address>" there. arp_ignore=1 and
+#      arp_announce=2 (all/default) close one leak each.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -343,6 +347,7 @@
 #                          nistp256 included)
 #   --no-sudo-timestamp    leave sudo's credential cache as configured
 #   --no-loopback-isolation leave route_localnet and the loopback firewall rules alone
+#   --no-arp-flux          leave arp_ignore / arp_announce at the kernel defaults
 #                          (window length and per-tty scope)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
@@ -410,6 +415,7 @@ DO_PAM_NULLOK=1
 DO_SSH_HOSTKEYS=1
 DO_SUDO_TIMESTAMP=1
 DO_LOOPBACK=1
+DO_ARP_FLUX=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -505,6 +511,7 @@ parse_args() {
             --no-ssh-hostkeys) DO_SSH_HOSTKEYS=0; shift;;
             --no-sudo-timestamp) DO_SUDO_TIMESTAMP=0; shift;;
             --no-loopback-isolation) DO_LOOPBACK=0; shift;;
+            --no-arp-flux) DO_ARP_FLUX=0; shift;;
             --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
@@ -4084,6 +4091,44 @@ setup_loopback_isolation() {
     ok "A service bound to localhost stays local even if route_localnet is turned back on"
 }
 
+# ---- Step 54: ARP flux ---------------------------------------------------------
+ARP_FLUX_SYSCTL=/etc/sysctl.d/99-hardening-arp.conf
+
+setup_arp_flux() {
+    [ "$DO_ARP_FLUX" -eq 1 ] || { log "Skipping ARP flux hardening"; return 0; }
+    log "Stopping ARP from giving one network's address away on another"
+    # Linux answers ARP for ANY of its addresses on ANY interface (the weak
+    # host model), and picks the sender IP of its own ARP requests from the
+    # packet, not the interface. Measured (debian:13 attached to a second
+    # Docker network, neighbour on the first, defaults 0/0): `arping -I eth0
+    # <eth1 address>` got two replies, and a request the box sent on eth0
+    # said "tell <eth1 address>" - a box in a DMZ and a back-office network
+    # tells the DMZ the back-office address, twice over. arp_ignore=1 answers
+    # only for addresses of the interface asked; arp_announce=2 always
+    # announces that interface's own address. Each closes one leak (measured
+    # all four combinations). Both are max(all, interface), so `all` covers
+    # every interface; a single-NIC box sees no change. Not claimed: that an
+    # address becomes unreachable by ROUTING - that is the firewall's job.
+    local content
+    content=$(printf '%s\n%s\n%s\n%s\n%s\n' \
+        '# Managed by harden.sh (ARP flux step). Edit the script, not this file.' \
+        'net.ipv4.conf.all.arp_ignore = 1' \
+        'net.ipv4.conf.default.arp_ignore = 1' \
+        'net.ipv4.conf.all.arp_announce = 2' \
+        'net.ipv4.conf.default.arp_announce = 2')
+    if [ -f "$ARP_FLUX_SYSCTL" ] && [ "$(cat "$ARP_FLUX_SYSCTL")" = "$content" ]; then
+        ok "ARP flux already closed (arp_ignore=1, arp_announce=2)"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s (arp_ignore = 1, arp_announce = 2)\n' "$c_yellow" "$c_reset" "$ARP_FLUX_SYSCTL"
+        return 0
+    fi
+    printf '%s\n' "$content" > "$ARP_FLUX_SYSCTL"
+    sysctl -q -p "$ARP_FLUX_SYSCTL" >/dev/null 2>&1 || true
+    ok "ARP answers only for the interface asked, and announces that interface's own address"
+}
+
 main() {
     require_root
     check_debian
@@ -4142,6 +4187,7 @@ main() {
     [ "$DO_SSH_HOSTKEYS" -eq 1 ] && echo "    - SSH host keys: ed25519 (+ RSA >= 3072), no ECDSA nistp256"
     [ "$DO_SUDO_TIMESTAMP" -eq 1 ] && echo "    - sudo credential cache: ${SUDO_TIMESTAMP_MINUTES} minutes, per terminal"
     [ "$DO_LOOPBACK" -eq 1 ] && echo "    - loopback isolation (route_localnet = 0 + ufw DROP for 127.0.0.0/8 off lo)"
+    [ "$DO_ARP_FLUX" -eq 1 ] && echo "    - ARP flux closed (arp_ignore = 1, arp_announce = 2)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -4209,6 +4255,7 @@ main() {
     setup_ssh_hostkeys
     setup_sudo_timestamp
     setup_loopback_isolation
+    setup_arp_flux
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }

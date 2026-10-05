@@ -755,6 +755,23 @@ docker exec s45 ufw status 2>/dev/null | grep -q 'Status: active' \
   || F "the firewall step should still apply" "ufw not active"
 docker rm -f s45 >/dev/null 2>&1
 
+echo "-- 46. Skip a step: --no-arp-flux ----------------------------"
+fresh_node s46
+# Debian's defaults ARE the offender (0/0): with the step skipped they stay,
+# and step 6's sysctl drop-in is still written.
+docker exec s46 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-arp-flux -y >/dev/null 2>&1
+if docker exec s46 test -e /etc/sysctl.d/99-hardening-arp.conf; then
+  F "--no-arp-flux should not write the ARP drop-in" "99-hardening-arp.conf exists"
+elif [ "$(docker exec s46 sysctl -n net.ipv4.conf.all.arp_ignore)" = "0" ]; then
+  P "--no-arp-flux -> arp_ignore stays at the kernel default 0 (step skipped)"
+else
+  F "--no-arp-flux should leave arp_ignore at 0" "$(docker exec s46 sysctl -n net.ipv4.conf.all.arp_ignore)"
+fi
+docker exec s46 test -f /etc/sysctl.d/99-hardening.conf \
+  && P "the kernel sysctl step still ran (99-hardening.conf present)" \
+  || F "the kernel sysctl step should still apply" "no 99-hardening.conf"
+docker rm -f s46 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
