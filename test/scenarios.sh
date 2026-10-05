@@ -772,6 +772,23 @@ docker exec s46 test -f /etc/sysctl.d/99-hardening.conf \
   || F "the kernel sysctl step should still apply" "no 99-hardening.conf"
 docker rm -f s46 >/dev/null 2>&1
 
+echo "-- 47. Skip a step: --no-arp-spoof-guard ---------------------"
+fresh_node s47
+# Debian's defaults ARE the offender (0/0): with the step skipped they stay,
+# and the ARP flux step's drop-in is still written.
+docker exec s47 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-arp-spoof-guard -y >/dev/null 2>&1
+if docker exec s47 test -e /etc/sysctl.d/99-hardening-arp-spoof.conf; then
+  F "--no-arp-spoof-guard should not write the spoof drop-in" "99-hardening-arp-spoof.conf exists"
+elif [ "$(docker exec s47 sysctl -n net.ipv4.conf.all.drop_gratuitous_arp)" = "0" ]; then
+  P "--no-arp-spoof-guard -> drop_gratuitous_arp stays at the kernel default 0 (step skipped)"
+else
+  F "--no-arp-spoof-guard should leave drop_gratuitous_arp at 0" "$(docker exec s47 sysctl -n net.ipv4.conf.all.drop_gratuitous_arp)"
+fi
+docker exec s47 test -f /etc/sysctl.d/99-hardening-arp.conf \
+  && P "the ARP flux step still ran (99-hardening-arp.conf present)" \
+  || F "the ARP flux step should still apply" "no 99-hardening-arp.conf"
+docker rm -f s47 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \

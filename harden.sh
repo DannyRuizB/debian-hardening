@@ -274,6 +274,10 @@
 #      other - measured: with Linux's 0/0 it answers ARP on eth0 for its
 #      eth1 address and asks "tell <eth1 address>" there. arp_ignore=1 and
 #      arp_announce=2 (all/default) close one leak each.
+#  55. ARP spoofing: drop_gratuitous_arp=1 ignores the unsolicited ARP reply
+#      a poisoner broadcasts to overwrite a neighbour's cache, and
+#      arp_filter=1 answers only for an address that lives on the interface
+#      the request arrived on (all/default). Both ship 0 (measured).
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -348,6 +352,7 @@
 #   --no-sudo-timestamp    leave sudo's credential cache as configured
 #   --no-loopback-isolation leave route_localnet and the loopback firewall rules alone
 #   --no-arp-flux          leave arp_ignore / arp_announce at the kernel defaults
+#   --no-arp-spoof-guard   leave drop_gratuitous_arp / arp_filter at the defaults
 #                          (window length and per-tty scope)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
@@ -416,6 +421,7 @@ DO_SSH_HOSTKEYS=1
 DO_SUDO_TIMESTAMP=1
 DO_LOOPBACK=1
 DO_ARP_FLUX=1
+DO_ARP_SPOOF_GUARD=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -512,6 +518,7 @@ parse_args() {
             --no-sudo-timestamp) DO_SUDO_TIMESTAMP=0; shift;;
             --no-loopback-isolation) DO_LOOPBACK=0; shift;;
             --no-arp-flux) DO_ARP_FLUX=0; shift;;
+            --no-arp-spoof-guard) DO_ARP_SPOOF_GUARD=0; shift;;
             --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
@@ -4129,6 +4136,48 @@ setup_arp_flux() {
     ok "ARP answers only for the interface asked, and announces that interface's own address"
 }
 
+# ---- Step 55: ARP spoofing guard ---------------------------------------------
+ARP_SPOOF_SYSCTL=/etc/sysctl.d/99-hardening-arp-spoof.conf
+
+setup_arp_spoof_guard() {
+    [ "$DO_ARP_SPOOF_GUARD" -eq 1 ] || { log "Skipping ARP spoofing guard"; return 0; }
+    log "Hardening the ARP cache against spoofing (gratuitous ARP + wrong-interface replies)"
+    # Step 54 stopped the box GIVING an address away; this stops it BELIEVING a
+    # neighbour's lie. Two knobs, measured on debian:13 as 0/0 (so each does
+    # real work):
+    #   - drop_gratuitous_arp = 1: a gratuitous ARP is an UNSOLICITED reply
+    #     broadcast to "update" everyone's cache - the exact packet an ARP
+    #     poisoner sends to bind a victim's IP to the attacker's MAC. With 0
+    #     the kernel accepts it; with 1 it is dropped and the cache keeps the
+    #     entry it learned from a real request/reply exchange.
+    #   - arp_filter = 1: on a multi-homed box the kernel otherwise answers an
+    #     ARP for any local address out of any interface (the same weak-host
+    #     model behind step 54); arp_filter makes each interface answer only
+    #     for the address that actually lives on it, so an attacker on one
+    #     segment cannot farm the MACs of addresses that belong to another.
+    # Both are max(all, interface), so `all` covers every present and future
+    # NIC. Not claimed: that this replaces static ARP or 802.1X on a hostile
+    # LAN - it raises the cost of the broadcast-poisoning path, no more.
+    local content
+    content=$(printf '%s\n%s\n%s\n%s\n%s\n' \
+        '# Managed by harden.sh (ARP spoofing-guard step). Edit the script, not this file.' \
+        'net.ipv4.conf.all.drop_gratuitous_arp = 1' \
+        'net.ipv4.conf.default.drop_gratuitous_arp = 1' \
+        'net.ipv4.conf.all.arp_filter = 1' \
+        'net.ipv4.conf.default.arp_filter = 1')
+    if [ -f "$ARP_SPOOF_SYSCTL" ] && [ "$(cat "$ARP_SPOOF_SYSCTL")" = "$content" ]; then
+        ok "ARP spoofing guard already in place (drop_gratuitous_arp=1, arp_filter=1)"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s (drop_gratuitous_arp = 1, arp_filter = 1)\n' "$c_yellow" "$c_reset" "$ARP_SPOOF_SYSCTL"
+        return 0
+    fi
+    printf '%s\n' "$content" > "$ARP_SPOOF_SYSCTL"
+    sysctl -q -p "$ARP_SPOOF_SYSCTL" >/dev/null 2>&1 || true
+    ok "Unsolicited ARP replies are dropped, and each interface answers only for its own address"
+}
+
 main() {
     require_root
     check_debian
@@ -4188,6 +4237,7 @@ main() {
     [ "$DO_SUDO_TIMESTAMP" -eq 1 ] && echo "    - sudo credential cache: ${SUDO_TIMESTAMP_MINUTES} minutes, per terminal"
     [ "$DO_LOOPBACK" -eq 1 ] && echo "    - loopback isolation (route_localnet = 0 + ufw DROP for 127.0.0.0/8 off lo)"
     [ "$DO_ARP_FLUX" -eq 1 ] && echo "    - ARP flux closed (arp_ignore = 1, arp_announce = 2)"
+    [ "$DO_ARP_SPOOF_GUARD" -eq 1 ] && echo "    - ARP spoofing guard (drop_gratuitous_arp = 1, arp_filter = 1)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -4256,6 +4306,7 @@ main() {
     setup_sudo_timestamp
     setup_loopback_isolation
     setup_arp_flux
+    setup_arp_spoof_guard
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
