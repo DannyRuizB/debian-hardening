@@ -766,6 +766,15 @@ net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
+# all/default alone are not enough: IPv4 honours send_redirects (and
+# accept_redirects on a non-forwarding host) when all OR the interface says 1,
+# and IPv6 reads accept_redirects per interface only. An interface that
+# already exists when this file is applied (eth0, on the first run) keeps its
+# shipped 1 — measured: all=0, eth0=1. The globs reach every current
+# interface; interfaces created later inherit default=0.
+net.ipv4.conf.*.accept_redirects = 0
+net.ipv4.conf.*.send_redirects = 0
+net.ipv6.conf.*.accept_redirects = 0
 
 # Source-routed packets: legacy feature, only useful for spoofing.
 net.ipv4.conf.all.accept_source_route = 0
