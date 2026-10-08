@@ -233,7 +233,8 @@
 #      server package (samba, nfs, bind, dhcp, ftp, snmp, squid, mail) is
 #      REPORTED by the audit, never removed: those are business decisions.
 #  45. Kernel attack surface: io_uring off, SysRq hotkeys off, no tty
-#      line-discipline autoload, no unprivileged user namespaces.
+#      line-discipline autoload, no unprivileged user namespaces, no
+#      kernel-fault userfaultfd for unprivileged accounts.
 #  46. SUID diet: chfn, chsh, gpasswd, newgrp and expiry lose their
 #      setuid/setgid bits, pinned with dpkg-statoverride so upgrades keep it.
 #  47. Per-session process limits: nproc 4096 for every non-root login, so
@@ -335,7 +336,8 @@
 #   --no-var-tmp-confinement skip /var/tmp hardening (bind mount, nodev,nosuid,noexec + fstab pin)
 #   --no-service-purge     skip purging avahi-daemon, cups(-daemon/-browsed) and rpcbind
 #   --no-kernel-surface    skip the kernel attack-surface sysctls (io_uring, SysRq,
-#                          tty ldisc autoload, unprivileged user namespaces)
+#                          tty ldisc autoload, unprivileged user namespaces,
+#                          unprivileged userfaultfd)
 #   --no-suid-diet         skip stripping setuid/setgid from chfn, chsh, gpasswd,
 #                          newgrp and expiry (pinned with dpkg-statoverride)
 #   --no-process-limits    skip the per-session process cap (nproc 4096 via
@@ -3510,12 +3512,12 @@ setup_service_purge() {
     ok "The box no longer announces itself, prints for strangers or maps ports for anyone who asks"
 }
 
-# ---- Step 45: kernel attack surface (io_uring, SysRq, ldisc autoload, userns) --
+# ---- Step 45: kernel attack surface (io_uring, SysRq, ldisc, userns, uffd) ---
 KERNEL_SURFACE_DROPIN=/etc/sysctl.d/99-hardening-kernel-surface.conf
 
 setup_kernel_surface() {
     [ "$DO_KERNEL_SURFACE" -eq 1 ] || { log "Skipping kernel attack-surface sysctls"; return 0; }
-    log "Closing kernel interfaces a server never needs (io_uring, SysRq, tty ldisc autoload, unprivileged userns)"
+    log "Closing kernel interfaces a server never needs (io_uring, SysRq, tty ldisc autoload, unprivileged userns and userfaultfd)"
     # Step 39 priced the exploit PRIMITIVES; this step closes whole
     # INTERFACES — kernel code any local process can reach and a headless
     # server has no use for. Each one is a bug class with a name:
@@ -3543,16 +3545,30 @@ setup_kernel_surface() {
     #     (this WSL one, measured): the drop-in pins it for the kernels that
     #     do, the live write notes. user.max_user_namespaces=0 is NOT the
     #     substitute — it forbids root too (containers, PrivateUsers=).
+    #   vm.unprivileged_userfaultfd=0: userfaultfd(2) lets a process catch
+    #     page faults on its own memory — including the ones the KERNEL takes
+    #     while copying from it, which freezes a syscall mid-way for as long
+    #     as the attacker likes: the standard way to win a kernel race (the
+    #     window-stretcher in a long run of public LPEs). 0 refuses that kind
+    #     of descriptor to accounts without CAP_SYS_PTRACE and still allows
+    #     UFFD_USER_MODE_ONLY, the user-fault-only mode CRIU-style tools
+    #     need. Measured on the CI runner (6.17): an unprivileged account
+    #     opens a full descriptor at 1 and gets EPERM at 0, the user-mode one
+    #     opens either way, root is unaffected. Modern kernels ship 0 (the
+    #     runner and this WSL, measured), so this is a pin against the
+    #     package or tuning guide that flips it to 1 — the CI plants that 1.
     local desired
     desired=$(cat <<'EOF'
 # Managed by harden.sh (kernel attack-surface step). Edit the script, not this file.
 # Close the kernel interfaces a headless server never needs: no io_uring
 # rings, no magic SysRq hotkeys, no tty line-discipline autoload, no
-# unprivileged user namespaces (where the kernel carries the knob).
+# unprivileged user namespaces (where the kernel carries the knob), no
+# kernel-fault userfaultfd for unprivileged accounts.
 kernel.io_uring_disabled = 2
 kernel.sysrq = 0
 dev.tty.ldisc_autoload = 0
 kernel.unprivileged_userns_clone = 0
+vm.unprivileged_userfaultfd = 0
 EOF
 )
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -3575,7 +3591,8 @@ EOF
         "kernel.io_uring_disabled 2" \
         "kernel.sysrq 0" \
         "dev.tty.ldisc_autoload 0" \
-        "kernel.unprivileged_userns_clone 0"; do
+        "kernel.unprivileged_userns_clone 0" \
+        "vm.unprivileged_userfaultfd 0"; do
         k="${kv% *}"; v="${kv#* }"
         if [ ! -e "/proc/sys/${k//./\/}" ]; then
             warn "$k does not exist on this kernel — pinned in the drop-in for kernels that have it"
@@ -4236,7 +4253,7 @@ main() {
     [ "$DO_APT_TRUST" -eq 1 ] && echo "    - apt source trust (no unsigned repos, no unauthenticated installs — pinned in apt.conf.d)"
     [ "$DO_VAR_TMP_CONFINEMENT" -eq 1 ] && echo "    - /var/tmp confinement (bind mount with nodev,nosuid,noexec + fstab pin)"
     [ "$DO_SERVICE_PURGE" -eq 1 ] && echo "    - attack-surface services purged (avahi-daemon, cups + cups-daemon/-browsed, rpcbind)"
-    [ "$DO_KERNEL_SURFACE" -eq 1 ] && echo "    - kernel attack surface closed (io_uring off, SysRq hotkeys off, no tty ldisc autoload, no unprivileged userns)"
+    [ "$DO_KERNEL_SURFACE" -eq 1 ] && echo "    - kernel attack surface closed (io_uring off, SysRq hotkeys off, no tty ldisc autoload, no unprivileged userns or userfaultfd)"
     [ "$DO_SUID_DIET" -eq 1 ] && echo "    - SUID diet: chfn, chsh, gpasswd, newgrp, expiry lose setuid/setgid (dpkg-statoverride pins)"
     [ "$DO_PROCESS_LIMITS" -eq 1 ] && echo "    - per-session process cap (nproc 4096 for every non-root login; fork bombs die small)"
     [ "$DO_CONSOLE_REBOOT" -eq 1 ] && echo "    - console reboot surface closed (Ctrl+Alt+Del target masked, burst action off)"
