@@ -257,6 +257,20 @@ jobs:
           echo "userfaultfd open - an unprivileged account (nobody) gets a kernel-fault descriptor:"
           docker exec -i db-harden-node setpriv --reuid=65534 --regid=65534 --clear-groups perl < test/uffd-probe.pl
 
+      # Step 56 offender: the runner ships legacy_tiocsti=0 (measured) - plant
+      # the 1, and log the smoking gun: nobody, inside a pty, types a byte
+      # into its own terminal.
+      - name: Plant TIOCSTI on for step 56 to close
+        run: |
+          docker cp test/tiocsti-probe.pl db-harden-node:/tmp/tiocsti-probe.pl
+          docker exec -i db-harden-node bash -s <<'SH'
+          if [ -e /proc/sys/dev/tty/legacy_tiocsti ]; then echo 1 > /proc/sys/dev/tty/legacy_tiocsti; else echo "no legacy_tiocsti on this kernel (< 6.2)"; fi
+          grep -H . /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || true
+          echo "TIOCSTI open - nobody, inside a pty:"
+          script -qc "setpriv --reuid=65534 --regid=65534 --clear-groups perl /tmp/tiocsti-probe.pl" /tmp/t.out </dev/null >/dev/null 2>&1
+          grep -a TIOCSTI /tmp/t.out | tr -d '\r'
+          SH
+
       # Step 46 has natural offenders: the passwd and login packages ship
       # chfn/chsh/gpasswd/newgrp setuid root and expiry setgid shadow. Nothing
       # to plant - log the shipped modes so the flip is visible.

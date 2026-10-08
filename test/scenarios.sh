@@ -789,6 +789,29 @@ docker exec s47 test -f /etc/sysctl.d/99-hardening-arp.conf \
   || F "the ARP flux step should still apply" "no 99-hardening-arp.conf"
 docker rm -f s47 >/dev/null 2>&1
 
+echo "-- 48. Skip a step: --no-tiocsti -----------------------------"
+fresh_node s48
+# legacy_tiocsti is HOST-GLOBAL (one kernel for every container): plant the 1,
+# skip the step - it must stay 1 and no drop-in may appear - then put the 0
+# back, like scenario 31 does for ASLR.
+if docker exec s48 test -e /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null; then
+  docker exec s48 bash -c 'echo 1 > /proc/sys/dev/tty/legacy_tiocsti' >/dev/null 2>&1
+  docker exec s48 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-tiocsti -y >/dev/null 2>&1
+  got=$(docker exec s48 cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null)
+  [ "$got" = 1 ] && P "--no-tiocsti -> the planted legacy_tiocsti=1 survives (step skipped)" \
+                 || F "--no-tiocsti should leave legacy_tiocsti alone" "$got"
+  if docker exec s48 test -e /etc/sysctl.d/99-hardening-tiocsti.conf; then
+    F "--no-tiocsti should not write the TIOCSTI drop-in" "99-hardening-tiocsti.conf exists"
+  else
+    P "--no-tiocsti -> no TIOCSTI drop-in written"
+  fi
+  docker exec s48 bash -c 'echo 0 > /proc/sys/dev/tty/legacy_tiocsti' >/dev/null 2>&1
+else
+  P "--no-tiocsti -> kernel without legacy_tiocsti (< 6.2): nothing to skip"
+  P "--no-tiocsti -> (no knob, no drop-in to check)"
+fi
+docker rm -f s48 >/dev/null 2>&1
+
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
 [ "$fail" -eq 0 ] && echo " All flag scenarios behaved as documented." \
