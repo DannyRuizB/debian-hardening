@@ -11,8 +11,15 @@ asserts the effective state from inside.
 ```bash
 cd test
 ./node.sh up            # builds the image once
-./scenarios.sh
+./scenarios.sh          # all of them, 4 at a time (JOBS=n to change)
+./scenarios.sh 4 31     # just these
 ```
+
+Every scenario owns its container, so they run side by side — except the five
+that plant or assert a **host-global** sysctl (22 ptrace, 29 `fs.protected_*`,
+31 ASLR, 37 sysrq, 48 `legacy_tiocsti`): a privileged container shares the
+host's kernel, and every `harden.sh` run next door would overwrite the plant.
+Those run one at a time after the rest. The report comes out in scenario order.
 
 ## The scenarios
 
