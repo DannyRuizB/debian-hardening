@@ -192,6 +192,21 @@ jobs:
             grep -m1 "\[stack\]" /proc/self/maps | cut -d- -f1
             grep -H . /proc/sys/kernel/randomize_va_space /proc/sys/kernel/unprivileged_bpf_disabled /proc/sys/kernel/perf_event_paranoid'
 
+      # Step 6 offenders the runner hides: it ships dmesg_restrict=1 and
+      # kptr_restrict=1 (measured), so their checks passed with no hardening
+      # at all. Plant 0 for both. With step 39's perf_event_paranoid -1 just
+      # planted, the smoking gun is printed: nobody reads the kernel log, and
+      # the REAL address of the first kernel symbol.
+      - name: Plant readable dmesg and kernel pointers for step 6 to close
+        run: |
+          docker exec -i db-harden-node bash -s <<'SH'
+          echo 0 > /proc/sys/kernel/dmesg_restrict
+          echo 0 > /proc/sys/kernel/kptr_restrict
+          grep -H . /proc/sys/kernel/dmesg_restrict /proc/sys/kernel/kptr_restrict /proc/sys/kernel/perf_event_paranoid
+          echo "nobody reads the kernel log: $(setpriv --reuid=65534 --regid=65534 --clear-groups dmesg 2>&1 | head -1 | cut -c1-60)"
+          echo "nobody reads kernel addresses: $(setpriv --reuid=65534 --regid=65534 --clear-groups head -1 /proc/kallsyms)"
+          SH
+
       # Step 38 offenders — the logins that hide in the account DATA, all
       # three measured to work on a stock node before the step was written:
       # an EMPTY password authenticates with a bare Enter (pam_unix ships
