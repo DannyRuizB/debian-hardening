@@ -62,8 +62,12 @@ cd test
 | 42 | `--no-pam-nullok` | `nullok` survives on the `pam_unix` line of `common-auth` through the whole run (including the other PAM steps' `pam-auth-update` calls), the rest still applies |
 | 43 | `--no-ssh-hostkeys` | no host-key drop-in is written and `hostkeyalgorithms` still offers ECDSA, while the step-35 crypto drop-in is still there |
 | 44 | `--no-sudo-timestamp` | no timestamp drop-in is written and the planted `timestamp_type=global` + `timestamp_timeout=-1` stay in effect (`sudo -V`), while step 10's sudo drop-in is still there |
+| 45 | `--no-loopback-isolation` | a planted `route_localnet=1` (as kube-proxy plants it) survives, neither the loopback sysctl drop-in nor the ufw `127.0.0.0/8` rule is written, and step 5's firewall is still up |
+| 46 | `--no-arp-flux` | `arp_ignore` stays at Debian's `0` and no ARP drop-in is written, while step 6's sysctl drop-in still is |
+| 47 | `--no-arp-spoof-guard` | `drop_gratuitous_arp` stays at Debian's `0` and no spoof-guard drop-in is written, while the ARP flux step's drop-in still is |
+| 48 | `--no-tiocsti` | a planted `dev.tty.legacy_tiocsti=1` survives and no TIOCSTI drop-in is written; the knob is host-global, so the scenario puts `0` back itself (scenario 31's pattern) |
 
-**Result: 118/118 checks pass.**
+**Result: 120/120 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

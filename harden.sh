@@ -279,6 +279,11 @@
 #      a poisoner broadcasts to overwrite a neighbour's cache, and
 #      arp_filter=1 answers only for an address that lives on the interface
 #      the request arrived on (all/default). Both ship 0 (measured).
+#  56. Terminal input injection: dev.tty.legacy_tiocsti=0 stops an
+#      unprivileged process from pushing keystrokes into its terminal with
+#      TIOCSTI - the way a process left in an admin's `su`/`sudo` session
+#      types commands as that admin. Measured: at 1 nobody injects, at 0 it
+#      gets EIO; root keeps it (CAP_SYS_ADMIN). Kernels >= 6.2.
 #
 # Usage:
 #   sudo ./harden.sh [options]
@@ -355,6 +360,7 @@
 #   --no-loopback-isolation leave route_localnet and the loopback firewall rules alone
 #   --no-arp-flux          leave arp_ignore / arp_announce at the kernel defaults
 #   --no-arp-spoof-guard   leave drop_gratuitous_arp / arp_filter at the defaults
+#   --no-tiocsti           leave dev.tty.legacy_tiocsti at the kernel default
 #                          (window length and per-tty scope)
 #   --force-no-password    disable SSH password auth even if no key is found
 #                          (DANGEROUS: only with console access)
@@ -424,6 +430,7 @@ DO_SUDO_TIMESTAMP=1
 DO_LOOPBACK=1
 DO_ARP_FLUX=1
 DO_ARP_SPOOF_GUARD=1
+DO_TIOCSTI=1
 FORCE_NO_PASSWORD=0
 PASSWORDLESS_SUDO=1
 DRY_RUN=0
@@ -521,6 +528,7 @@ parse_args() {
             --no-loopback-isolation) DO_LOOPBACK=0; shift;;
             --no-arp-flux) DO_ARP_FLUX=0; shift;;
             --no-arp-spoof-guard) DO_ARP_SPOOF_GUARD=0; shift;;
+            --no-tiocsti) DO_TIOCSTI=0; shift;;
             --egress-allow)    EGRESS_PORTS+=("$2"); shift 2;;
             --force-no-password) FORCE_NO_PASSWORD=1; shift;;
             --no-passwordless-sudo) PASSWORDLESS_SUDO=0; shift;;
@@ -4204,6 +4212,50 @@ setup_arp_spoof_guard() {
     ok "Unsolicited ARP replies are dropped, and each interface answers only for its own address"
 }
 
+# ---- Step 56: terminal input injection (TIOCSTI) -----------------------------
+TIOCSTI_SYSCTL=/etc/sysctl.d/99-hardening-tiocsti.conf
+
+setup_tiocsti() {
+    [ "$DO_TIOCSTI" -eq 1 ] || { log "Skipping the TIOCSTI lockdown"; return 0; }
+    log "Stopping unprivileged processes from typing into their terminal (TIOCSTI)"
+    # TIOCSTI is an ioctl that pushes a byte into a terminal's INPUT queue, as
+    # if it had been typed. Any process holding the terminal may use it - and
+    # the terminal is often an admin's: run `su` or `sudo -s` from a session
+    # where something unprivileged is still attached (a background job, a
+    # compromised dotfile's helper), and when the admin's shell next reads its
+    # input, the injected command runs as the admin. It is the classic
+    # su/sudo session hijack, and a container escape when a runtime hands a
+    # container the host's tty. dev.tty.legacy_tiocsti = 0 (kernels >= 6.2)
+    # refuses TIOCSTI to anyone without CAP_SYS_ADMIN.
+    # Measured on the CI runner (6.17), as nobody inside a pty:
+    #   legacy_tiocsti = 1 -> INJECTED (the byte shows up in the terminal)
+    #   legacy_tiocsti = 0 -> "Input/output error"; root keeps it either way.
+    # The runner and this WSL lab kernel ship 0 already, so this is a pin
+    # against a kernel or a tuning guide that turns it back on - the CI
+    # plants the 1. Screen readers and `writevt` that type for the user need
+    # it: --no-tiocsti for those boxes.
+    if [ ! -e /proc/sys/dev/tty/legacy_tiocsti ]; then
+        warn "dev.tty.legacy_tiocsti does not exist on this kernel (< 6.2) - nothing to pin"
+        return 0
+    fi
+    local content
+    content=$(printf '%s\n%s\n' \
+        '# Managed by harden.sh (TIOCSTI step). Edit the script, not this file.' \
+        'dev.tty.legacy_tiocsti = 0')
+    if [ -f "$TIOCSTI_SYSCTL" ] && [ "$(cat "$TIOCSTI_SYSCTL")" = "$content" ] \
+        && [ "$(sysctl -n dev.tty.legacy_tiocsti 2>/dev/null)" = 0 ]; then
+        ok "TIOCSTI already refused to unprivileged processes (legacy_tiocsti = 0)"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    %s(dry-run)%s would write %s (dev.tty.legacy_tiocsti = 0) and apply it\n' "$c_yellow" "$c_reset" "$TIOCSTI_SYSCTL"
+        return 0
+    fi
+    printf '%s\n' "$content" > "$TIOCSTI_SYSCTL"
+    sysctl -q -p "$TIOCSTI_SYSCTL" >/dev/null 2>&1 || true
+    ok "Unprivileged processes can no longer type into their terminal"
+}
+
 main() {
     require_root
     check_debian
@@ -4264,6 +4316,7 @@ main() {
     [ "$DO_LOOPBACK" -eq 1 ] && echo "    - loopback isolation (route_localnet = 0 + ufw DROP for 127.0.0.0/8 off lo)"
     [ "$DO_ARP_FLUX" -eq 1 ] && echo "    - ARP flux closed (arp_ignore = 1, arp_announce = 2)"
     [ "$DO_ARP_SPOOF_GUARD" -eq 1 ] && echo "    - ARP spoofing guard (drop_gratuitous_arp = 1, arp_filter = 1)"
+    [ "$DO_TIOCSTI" -eq 1 ] && echo "    - no terminal input injection (dev.tty.legacy_tiocsti = 0)"
     [ "$DRY_RUN" -eq 1 ]        && warn "DRY-RUN: nothing will be changed."
 
     confirm "Proceed?" || { warn "Aborted."; exit 0; }
@@ -4333,6 +4386,7 @@ main() {
     setup_loopback_isolation
     setup_arp_flux
     setup_arp_spoof_guard
+    setup_tiocsti
 
     ok "Done. Review with: sshd -T | grep -Ei 'passwordauth|permitroot' ; ufw status verbose ; fail2ban-client status sshd"
 }
