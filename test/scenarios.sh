@@ -44,6 +44,7 @@ echo "============================================================="
 echo " SCENARIO TESTS — harden.sh flag behaviour"
 echo "============================================================="
 
+scenario_1() {
 echo "-- 1. Lockout guard: no key -> password auth STAYS on ------"
 fresh_node s1 >/dev/null
 docker exec s1 bash /root/harden.sh -y >/dev/null 2>&1
@@ -51,7 +52,9 @@ got=$(val s1 passwordauthentication)
 [ "$got" = yes ] && P "no key found -> PasswordAuthentication stays 'yes'" \
                  || F "PasswordAuthentication should stay yes without a key" "$got"
 docker rm -f s1 >/dev/null 2>&1
+}
 
+scenario_2() {
 echo "-- 2. Lockout guard override: --force-no-password ----------"
 fresh_node s2 >/dev/null
 docker exec s2 bash /root/harden.sh --force-no-password -y >/dev/null 2>&1
@@ -59,7 +62,9 @@ got=$(val s2 passwordauthentication)
 [ "$got" = no ] && P "--force-no-password -> PasswordAuthentication 'no' even without a key" \
                 || F "--force-no-password should force 'no'" "$got"
 docker rm -f s2 >/dev/null 2>&1
+}
 
+scenario_3() {
 echo "-- 3. With a key -> password auth is disabled --------------"
 fresh_node s3 >/dev/null
 docker exec s3 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" -y >/dev/null 2>&1
@@ -67,7 +72,9 @@ got=$(val s3 passwordauthentication)
 [ "$got" = no ] && P "key installed -> PasswordAuthentication 'no'" \
                 || F "with a key it should be 'no'" "$got"
 docker rm -f s3 >/dev/null 2>&1
+}
 
+scenario_4() {
 echo "-- 4. Custom SSH port: --ssh-port 2244 ---------------------"
 fresh_node s4 >/dev/null
 docker exec s4 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --ssh-port 2244 -y >/dev/null 2>&1
@@ -78,7 +85,9 @@ if docker exec s4 ufw status 2>/dev/null | grep -qE "^2244/tcp +ALLOW"; then
   P "UFW allows the custom port 2244"; else
   F "UFW should allow 2244/tcp" "$(docker exec s4 ufw status 2>/dev/null | grep -i 2244 || echo none)"; fi
 docker rm -f s4 >/dev/null 2>&1
+}
 
+scenario_5() {
 echo "-- 5. Extra port: --allow-port 80/tcp ----------------------"
 fresh_node s5 >/dev/null
 docker exec s5 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --allow-port 80/tcp -y >/dev/null 2>&1
@@ -86,7 +95,9 @@ if docker exec s5 ufw status 2>/dev/null | grep -qE "^80/tcp +ALLOW"; then
   P "UFW opens the extra port 80/tcp"; else
   F "UFW should allow 80/tcp" "$(docker exec s5 ufw status 2>/dev/null | grep -i '80/tcp' || echo none)"; fi
 docker rm -f s5 >/dev/null 2>&1
+}
 
+scenario_6() {
 echo "-- 6. Skip a step: --no-fail2ban ---------------------------"
 fresh_node s6 >/dev/null
 docker exec s6 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-fail2ban -y >/dev/null 2>&1
@@ -98,7 +109,9 @@ got=$(val s6 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s6 >/dev/null 2>&1
+}
 
+scenario_7() {
 echo "-- 7. Skip a step: --no-ssh-policies -----------------------"
 fresh_node s7 >/dev/null
 docker exec s7 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ssh-policies -y >/dev/null 2>&1
@@ -110,7 +123,9 @@ got=$(val s7 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s7 >/dev/null 2>&1
+}
 
+scenario_8() {
 echo "-- 8. Skip a step: --no-coredump-limits --------------------"
 fresh_node s8 >/dev/null
 docker exec s8 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-coredump-limits -y >/dev/null 2>&1
@@ -122,7 +137,9 @@ got=$(val s8 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s8 >/dev/null 2>&1
+}
 
+scenario_9() {
 echo "-- 9. Skip a step: --no-umask-tmout ------------------------"
 fresh_node s9 >/dev/null
 docker exec s9 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-umask-tmout -y >/dev/null 2>&1
@@ -134,7 +151,9 @@ got=$(val s9 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s9 >/dev/null 2>&1
+}
 
+scenario_10() {
 echo "-- 10. Skip a step: --no-cron-restrictions -----------------"
 fresh_node s10 >/dev/null
 docker exec s10 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-cron-restrictions -y >/dev/null 2>&1
@@ -146,7 +165,9 @@ got=$(val s10 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s10 >/dev/null 2>&1
+}
 
+scenario_11() {
 echo "-- 11. Skip a step: --no-password-policy -------------------"
 fresh_node s11 >/dev/null
 docker exec s11 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-password-policy -y >/dev/null 2>&1
@@ -158,7 +179,9 @@ got=$(val s11 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s11 >/dev/null 2>&1
+}
 
+scenario_12() {
 echo "-- 12. Skip a step: --no-aide ------------------------------"
 fresh_node s12 >/dev/null
 docker exec s12 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-aide -y >/dev/null 2>&1
@@ -170,7 +193,9 @@ got=$(val s12 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s12 >/dev/null 2>&1
+}
 
+scenario_13() {
 echo "-- 13. Skip a step: --no-rkhunter --------------------------"
 fresh_node s13 >/dev/null
 docker exec s13 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-rkhunter -y >/dev/null 2>&1
@@ -182,7 +207,9 @@ got=$(val s13 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s13 >/dev/null 2>&1
+}
 
+scenario_14() {
 echo "-- 14. Skip a step: --no-ssh-access ------------------------"
 fresh_node s14 >/dev/null
 docker exec s14 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ssh-access -y >/dev/null 2>&1
@@ -194,7 +221,9 @@ got=$(val s14 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s14 >/dev/null 2>&1
+}
 
+scenario_15() {
 echo "-- 15. Guard: no --admin-user -> AllowGroups is NOT written -"
 fresh_node s15 >/dev/null
 # No --admin-user: the step must refuse (an AllowGroups nobody satisfies
@@ -204,7 +233,9 @@ if docker exec s15 test -f /etc/ssh/sshd_config.d/96-hardening-access.conf 2>/de
   F "AllowGroups must not be written without an admin user" "file exists"; else
   P "no --admin-user -> AllowGroups skipped (lockout guard)"; fi
 docker rm -f s15 >/dev/null 2>&1
+}
 
+scenario_16() {
 echo "-- 16. Skip a step: --no-service-sandboxing ----------------"
 fresh_node s16 >/dev/null
 docker exec s16 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-service-sandboxing -y >/dev/null 2>&1
@@ -216,7 +247,9 @@ got=$(val s16 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s16 >/dev/null 2>&1
+}
 
+scenario_17() {
 echo "-- 17. Skip a step: --no-journald --------------------------"
 fresh_node s17 >/dev/null
 docker exec s17 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-journald -y >/dev/null 2>&1
@@ -228,7 +261,9 @@ got=$(val s17 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s17 >/dev/null 2>&1
+}
 
+scenario_18() {
 echo "-- 18. Skip a step: --no-su-restriction --------------------"
 fresh_node s18 >/dev/null
 docker exec s18 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-su-restriction -y >/dev/null 2>&1
@@ -244,7 +279,9 @@ got=$(val s18 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s18 >/dev/null 2>&1
+}
 
+scenario_19() {
 echo "-- 19. Skip a step: --no-log-permissions -------------------"
 fresh_node s19 >/dev/null
 # Plant a world-readable log; with the step skipped it must KEEP its world-
@@ -265,7 +302,9 @@ got=$(val s19 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s19 >/dev/null 2>&1
+}
 
+scenario_20() {
 echo "-- 20. Skip a step: --no-logrotate-perms --------------------"
 fresh_node s20 >/dev/null
 # Stock Debian is its own offender here: the global create is bare and the
@@ -283,7 +322,9 @@ got=$(val s20 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s20 >/dev/null 2>&1
+}
 
+scenario_21() {
 echo "-- 21. Skip a step: --no-home-permissions -------------------"
 fresh_node s21 >/dev/null
 # Plant a loose interactive home with a credential relic; with the step
@@ -305,7 +346,9 @@ got=$(val s21 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s21 >/dev/null 2>&1
+}
 
+scenario_22() {
 echo "-- 22. Skip a step: --no-process-isolation ------------------"
 fresh_node s22 >/dev/null
 # Plant the offending state: /proc without hidepid and ptrace_scope at 0.
@@ -327,7 +370,9 @@ got=$(val s22 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s22 >/dev/null 2>&1
+}
 
+scenario_23() {
 echo "-- 23. Skip a step: --no-guess-cost -------------------------"
 fresh_node s23 >/dev/null
 # Plant the WEAK values explicitly (the stock file carries neither key).
@@ -353,7 +398,9 @@ got=$(val s23 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s23 >/dev/null 2>&1
+}
 
+scenario_24() {
 echo "-- 24. Skip a step: --no-root-path --------------------------"
 fresh_node s24 >/dev/null
 # Plant the trap in all three PATH sources plus an empty entry. With the step
@@ -381,7 +428,9 @@ got=$(val s24 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s24 >/dev/null 2>&1
+}
 
+scenario_25() {
 echo "-- 25. Skip a step: --no-apt-sandboxing ---------------------"
 fresh_node s25
 docker exec s25 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-apt-sandboxing -y >/dev/null 2>&1
@@ -396,7 +445,9 @@ got=$(val s25 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s25 >/dev/null 2>&1
+}
 
+scenario_26() {
 echo "-- 26. Skip a step: --no-pw-history -------------------------"
 fresh_node s26
 docker exec s26 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-pw-history -y >/dev/null 2>&1
@@ -411,7 +462,9 @@ got=$(val s26 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s26 >/dev/null 2>&1
+}
 
+scenario_27() {
 echo "-- 27. Skip a step: --no-ssh-crypto --------------------------"
 fresh_node s27
 docker exec s27 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ssh-crypto -y >/dev/null 2>&1
@@ -430,7 +483,9 @@ got=$(val s27 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s27 >/dev/null 2>&1
+}
 
+scenario_28() {
 echo "-- 28. Skip a step: --no-legacy-protocols ------------------"
 fresh_node s28
 # Plant the natural offender the step exists to purge, then skip the step:
@@ -444,7 +499,9 @@ got=$(val s28 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s28 >/dev/null 2>&1
+}
 
+scenario_29() {
 echo "-- 29. Skip a step: --no-fs-protected ----------------------"
 fresh_node s29
 # Plant all four fs.protected_* weak, then skip the step: they must stay 0
@@ -461,7 +518,9 @@ got=$(val s29 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s29 >/dev/null 2>&1
+}
 
+scenario_30() {
 echo "-- 30. Skip a step: --no-account-hygiene --------------------"
 fresh_node s30
 # Plant the three data-level logins, then skip the step: the NIS '+' entry,
@@ -495,7 +554,9 @@ got=$(val s30 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s30 >/dev/null 2>&1
+}
 
+scenario_31() {
 echo "-- 31. Skip a step: --no-exploit-mitigations ----------------"
 fresh_node s31
 # Plant ASLR off, then skip the step: it must stay 0 (no other step touches
@@ -515,7 +576,9 @@ got=$(val s31 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker exec s31 bash -c 'echo 2 > /proc/sys/kernel/randomize_va_space' >/dev/null 2>&1
 docker rm -f s31 >/dev/null 2>&1
+}
 
+scenario_32() {
 echo "-- 32. Skip a step: --no-tmp-confinement --------------------"
 fresh_node s32
 docker exec s32 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-tmp-confinement -y >/dev/null 2>&1
@@ -530,7 +593,9 @@ got=$(val s32 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s32 >/dev/null 2>&1
+}
 
+scenario_33() {
 echo "-- 33. Skip a step: --no-time-sync --------------------------"
 fresh_node s33
 # The fresh node image has no time-sync daemon (measured) — absence IS the
@@ -546,7 +611,9 @@ got=$(val s33 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s33 >/dev/null 2>&1
+}
 
+scenario_34() {
 echo "-- 34. Skip a step: --no-apt-trust --------------------------"
 fresh_node s34
 # Plant the broken-mirror workaround: with the step skipped it must stay the
@@ -563,7 +630,9 @@ got=$(val s34 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s34 >/dev/null 2>&1
+}
 
+scenario_35() {
 echo "-- 35. Skip a step: --no-var-tmp-confinement ----------------"
 fresh_node s35
 # The fresh node has /var/tmp as a plain directory (measured) — absence of
@@ -579,7 +648,9 @@ got=$(val s35 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s35 >/dev/null 2>&1
+}
 
+scenario_36() {
 echo "-- 36. Skip a step: --no-service-purge ----------------------"
 fresh_node s36
 # Plant the smallest of the three (rpcbind) — with the step skipped it must
@@ -595,6 +666,9 @@ got=$(val s36 permitrootlogin)
 docker rm -f s36 >/dev/null 2>&1
 
 echo "============================================================="
+}
+
+scenario_37() {
 echo "-- 37. Skip a step: --no-kernel-surface ---------------------"
 fresh_node s37
 # Plant SysRq fully open (Debian's 438), then skip the step: it must stay
@@ -615,7 +689,9 @@ got=$(val s37 permitrootlogin)
                 || F "SSH hardening should still apply" "$got"
 docker exec s37 bash -c "echo '${sysrq_was:-0}' > /proc/sys/kernel/sysrq" >/dev/null 2>&1
 docker rm -f s37 >/dev/null 2>&1
+}
 
+scenario_38() {
 echo "-- 38. Skip a step: --no-suid-diet ---------------------------"
 fresh_node s38
 # The fresh node ships chfn setuid root (4755, passwd package): with the step
@@ -631,7 +707,9 @@ got=$(val s38 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s38 >/dev/null 2>&1
+}
 
+scenario_39() {
 echo "-- 39. Skip a step: --no-process-limits -----------------------"
 fresh_node s39
 # The fresh node ships every session unlimited (natural offender): with the
@@ -648,7 +726,9 @@ got=$(val s39 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s39 >/dev/null 2>&1
+}
 
+scenario_40() {
 echo "-- 40. Skip a step: --no-console-reboot ----------------------"
 fresh_node s40
 # The fresh node ships ctrl-alt-del.target as an alias (natural offender): with
@@ -664,7 +744,9 @@ got=$(val s40 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s40 >/dev/null 2>&1
+}
 
+scenario_41() {
 echo "-- 41. Skip a step: --no-egress ------------------------------"
 fresh_node s41
 # Step 5 sets `default allow outgoing` (the natural offender): with the egress
@@ -680,7 +762,9 @@ got=$(val s41 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s41 >/dev/null 2>&1
+}
 
+scenario_42() {
 echo "-- 42. Skip a step: --no-pam-nullok --------------------------"
 fresh_node s42
 # Debian ships pam_unix with nullok (natural offender): with the step skipped
@@ -697,7 +781,9 @@ got=$(val s42 permitrootlogin)
 [ "$got" = no ] && P "the other steps still ran (PermitRootLogin no)" \
                 || F "SSH hardening should still apply" "$got"
 docker rm -f s42 >/dev/null 2>&1
+}
 
+scenario_43() {
 echo "-- 43. Skip a step: --no-ssh-hostkeys ------------------------"
 fresh_node s43
 # Natural offender: Debian serves its ECDSA nistp256 host key. With the step
@@ -715,7 +801,9 @@ docker exec s43 test -f /etc/ssh/sshd_config.d/95-hardening-crypto.conf \
   && P "the other SSH steps still ran (crypto policy drop-in present)" \
   || F "the SSH crypto step should still apply" "no 95-hardening-crypto.conf"
 docker rm -f s43 >/dev/null 2>&1
+}
 
+scenario_44() {
 echo "-- 44. Skip a step: --no-sudo-timestamp ----------------------"
 fresh_node s44
 # Debian's own cache is already per-tty, so the offender is planted (as in
@@ -735,7 +823,9 @@ docker exec s44 test -f /etc/sudoers.d/99-hardening-sudo \
   && P "the other sudo step still ran (use_pty + logfile drop-in present)" \
   || F "the sudo hardening step should still apply" "no 99-hardening-sudo"
 docker rm -f s44 >/dev/null 2>&1
+}
 
+scenario_45() {
 echo "-- 45. Skip a step: --no-loopback-isolation ------------------"
 fresh_node s45
 # The offender is planted as kube-proxy plants it; with the step skipped it
@@ -754,7 +844,9 @@ docker exec s45 ufw status 2>/dev/null | grep -q 'Status: active' \
   && P "the firewall step still ran (ufw active)" \
   || F "the firewall step should still apply" "ufw not active"
 docker rm -f s45 >/dev/null 2>&1
+}
 
+scenario_46() {
 echo "-- 46. Skip a step: --no-arp-flux ----------------------------"
 fresh_node s46
 # Debian's defaults ARE the offender (0/0): with the step skipped they stay,
@@ -771,7 +863,9 @@ docker exec s46 test -f /etc/sysctl.d/99-hardening.conf \
   && P "the kernel sysctl step still ran (99-hardening.conf present)" \
   || F "the kernel sysctl step should still apply" "no 99-hardening.conf"
 docker rm -f s46 >/dev/null 2>&1
+}
 
+scenario_47() {
 echo "-- 47. Skip a step: --no-arp-spoof-guard ---------------------"
 fresh_node s47
 # Debian's defaults ARE the offender (0/0): with the step skipped they stay,
@@ -788,7 +882,9 @@ docker exec s47 test -f /etc/sysctl.d/99-hardening-arp.conf \
   && P "the ARP flux step still ran (99-hardening-arp.conf present)" \
   || F "the ARP flux step should still apply" "no 99-hardening-arp.conf"
 docker rm -f s47 >/dev/null 2>&1
+}
 
+scenario_48() {
 echo "-- 48. Skip a step: --no-tiocsti -----------------------------"
 fresh_node s48
 # legacy_tiocsti is HOST-GLOBAL (one kernel for every container): plant the 1,
@@ -811,6 +907,51 @@ else
   P "--no-tiocsti -> (no knob, no drop-in to check)"
 fi
 docker rm -f s48 >/dev/null 2>&1
+}
+
+# --- Runner ------------------------------------------------------------------
+# Each scenario above owns its container (sN) and removes it, so they can run
+# side by side - except the ones that plant or assert a HOST-GLOBAL sysctl (one
+# kernel for every container: yama ptrace_scope, fs.protected_*, ASLR, sysrq,
+# legacy_tiocsti). Every harden.sh run writes those knobs, so a run next door
+# would overwrite the plant; they go one at a time after the rest.
+#   ./scenarios.sh          all of them, JOBS (default 4) at a time
+#   ./scenarios.sh 4 31     just these
+SERIAL=" 22 29 31 37 48 "
+JOBS=${JOBS:-4}
+LOGS=$(mktemp -d); trap 'rm -rf "$LOGS"' EXIT
+
+all=$(declare -F | awk '$3 ~ /^scenario_[0-9]+$/ {sub("scenario_", "", $3); print $3}' | sort -n)
+want=${*:-$all}
+for n in $want; do
+  declare -F "scenario_$n" >/dev/null || { echo "no scenario $n (have: ${all//$'\n'/ })"; exit 2; }
+done
+
+# run_one N — run scenario N into its own log, then report one progress line.
+run_one() {
+  "scenario_$1" >"$LOGS/$1.log" 2>&1
+  printf "  scenario %-3s done: %s PASS, %s FAIL\n" "$1" \
+    "$(grep -c $'\033\\[32mPASS' "$LOGS/$1.log")" "$(grep -c $'\033\\[31mFAIL' "$LOGS/$1.log")"
+}
+
+running=0
+for n in $want; do
+  [[ "$SERIAL" == *" $n "* ]] && continue
+  run_one "$n" &
+  running=$((running + 1))
+  if [ "$running" -ge "$JOBS" ]; then wait -n; running=$((running - 1)); fi
+done
+wait
+for n in $want; do
+  [[ "$SERIAL" == *" $n "* ]] && run_one "$n"
+done
+
+# The report, in scenario order; the counts come from the logs because the
+# P/F counters above were bumped in subshells.
+echo
+for n in $want; do cat "$LOGS/$n.log"; done
+pass=$(cat "$LOGS"/*.log | grep -c $'\033\\[32mPASS')
+fail=$(cat "$LOGS"/*.log | grep -c $'\033\\[31mFAIL')
 
 total=$((pass + fail))
 echo " $pass/$total scenario checks passed"
