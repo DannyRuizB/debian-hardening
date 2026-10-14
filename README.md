@@ -147,7 +147,7 @@ sudo fail2ban-client status sshd
 
 Written for Debian 12 (Bookworm) and Debian 13 (Trixie), and should work on
 Debian-based distros that ship `ufw`, `fail2ban` and `unattended-upgrades`. The
-script is checked in CI (`bash -n`, ShellCheck and a bats unit suite); always
+script is checked in CI (`bash -n`, ShellCheck — the test harness too — and a bats unit suite); always
 run it with `--dry-run` first against a host you can reach by console.
 
 ## Tests

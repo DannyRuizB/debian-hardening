@@ -48,7 +48,7 @@ case "${1:-}" in
   wait)
     # No CI key is installed yet (harden.sh runs later and installs it), so we
     # can't authenticate. Just confirm sshd is up by reading its banner.
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
       if timeout 2 bash -c \
           "exec 3<>/dev/tcp/127.0.0.1/$PORT; read -r line <&3; case \$line in SSH-*) exit 0;; *) exit 1;; esac" \
           2>/dev/null; then

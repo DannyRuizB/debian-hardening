@@ -1635,7 +1635,7 @@ echo "== Fail2Ban really bans =="
 # few attempts right after a (re)start while it catches up with the journal, so
 # retry whole waves rather than assuming one burst is enough.
 banned=no
-for wave in 1 2 3; do
+for _wave in 1 2 3; do
   for u in root admin test oracle git postgres ubuntu daniel; do
     ssh "${OPTS[@]}" -o ConnectTimeout=3 -i "$KEY" "$u@127.0.0.1" true >/dev/null 2>&1 || true
   done
