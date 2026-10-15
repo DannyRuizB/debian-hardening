@@ -23,6 +23,13 @@ jobs:
 
       - name: ShellCheck
         run: shellcheck harden.sh
+      # The e2e harness (verify / audit / scenarios / attacks ...) is ~4,000
+      # lines of bash that decide whether the hardening PASSES - a bug there
+      # is a check that silently stops checking. Warnings and errors only:
+      # the style notes (SC2015 `a && b || c`, SC2016 single-quoted $) are
+      # the suite's deliberate idiom.
+      - name: ShellCheck (test harness)
+        run: shellcheck -S warning test/*.sh
 
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats

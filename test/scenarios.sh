@@ -12,7 +12,7 @@
 # All local and disposable; every scenario cleans up its own container.
 # =============================================================================
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 IMAGE="db-harden-node"
 KEY=".ssh_ci/id_ci"
