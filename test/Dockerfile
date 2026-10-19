@@ -2,7 +2,9 @@
 # fail2ban and unattended-upgrades run as real services) plus sshd. harden.sh
 # is run INSIDE this container as root (via docker exec), exactly as you'd run
 # it on a real box — then the test attacks it over SSH from outside.
-FROM debian:13
+# The README promises Debian 12 and 13; the e2e builds both (DEBIAN=12|13).
+ARG DEBIAN=13
+FROM debian:${DEBIAN}
 
 ENV container=docker
 

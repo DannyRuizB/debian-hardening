@@ -26,7 +26,7 @@ F() { printf "    \033[31mFAIL\033[0m %s (got: %s)\n" "$1" "$2"; fail=$((fail+1)
 PUBKEY=$(cat "$KEY.pub")
 
 # Ensure the node image exists (built by node.sh up); build it if not.
-docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" . >/dev/null
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build --build-arg DEBIAN="${DEBIAN:-13}" -t "$IMAGE" . >/dev/null
 
 # fresh_node NAME — boot a clean systemd container with harden.sh inside.
 fresh_node() {
