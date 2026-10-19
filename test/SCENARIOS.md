@@ -73,8 +73,10 @@ Those run one at a time after the rest. The report comes out in scenario order.
 | 46 | `--no-arp-flux` | `arp_ignore` stays at Debian's `0` and no ARP drop-in is written, while step 6's sysctl drop-in still is |
 | 47 | `--no-arp-spoof-guard` | `drop_gratuitous_arp` stays at Debian's `0` and no spoof-guard drop-in is written, while the ARP flux step's drop-in still is |
 | 48 | `--no-tiocsti` | a planted `dev.tty.legacy_tiocsti=1` survives and no TIOCSTI drop-in is written; the knob is host-global, so the scenario puts `0` back itself (scenario 31's pattern) |
+| 49 | `--no-ufw` | **one layer at a time**: `icmp_echo_ignore_broadcasts` is pinned twice on a hardened box — step 6's drop-in and UFW's own `/etc/ufw/sysctl.conf`, re-applied on every enable. With UFW not active, a planted `0` still becomes `1` and `bcast-probe.sh` sees the node ignore broadcast pings: step 6 alone holds it |
+| 50 | `--no-sysctl` | the other layer: no `99-hardening.conf`, a planted `0`, and UFW's `sysctl.conf` alone turns it into `1` — the node still ignores broadcast pings. Kept as a check so the two-layer claim stays measured |
 
-**Result: 120/120 checks pass.**
+**Result: 126/126 checks pass.**
 
 ## Why the lockout guard scenario matters most
 

@@ -374,6 +374,18 @@ jobs:
           echo "before hardening: $res"
           case "$res" in RESULT=LEAKS*) ;; *) echo "::error::the ARP probe sees no leak even with the kernel defaults - its CLEAN after hardening would prove nothing"; exit 1;; esac
 
+      # Step 6 keys nobody checked until now: the runner, like the kernel,
+      # ships icmp_echo_ignore_broadcasts=1 and icmp_ignore_bogus_error_responses=1.
+      # Plant 0 for both (per network namespace: only the node's), and the
+      # probe verify runs must see the node ANSWER a ping to the broadcast
+      # address here - or its IGNORES after hardening would prove nothing.
+      - name: Plant broadcast-ping answers for step 6 to close
+        run: |
+          docker exec db-harden-node sysctl -qw net.ipv4.icmp_echo_ignore_broadcasts=0 net.ipv4.icmp_ignore_bogus_error_responses=0
+          res=$(./test/bcast-probe.sh db-harden-node)
+          echo "before hardening: $res"
+          case "$res" in RESULT=ANSWERS*) ;; *) echo "::error::the node does not answer a broadcast ping even at icmp_echo_ignore_broadcasts=0 - its IGNORES after hardening would prove nothing"; exit 1;; esac
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \

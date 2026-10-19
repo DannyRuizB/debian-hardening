@@ -59,7 +59,7 @@ changing key-only behaviour. That's the whole loop:
 When the baseline later gained step 6 (kernel hardening via sysctl), the audit
 grew with it: a **Kernel parameters (CIS network)** section now grades seven of
 the keys the drop-in promises (ICMP redirects, source routing, rp_filter, SYN
-cookies, `dmesg_restrict`, `suid_dumpable`). The redirect checks later learned to read every
+cookies, `dmesg_restrict`, `suid_dumpable`; broadcast pings and bogus ICMP error responses joined later, two keys the drop-in had promised since step 6 that nothing graded). The redirect checks later learned to read every
 interface, not just `all`: IPv4 `send_redirects` is all-OR-interface and IPv6
 reads `accept_redirects` per interface, so `eth0` left at its shipped 1 kept
 redirects live while the old check said PASS (and a third check, ICMPv6
@@ -105,7 +105,7 @@ logs to 644 went unnoticed while this line said 160 and the node scored 164
 with 3 WARN — one of them a broken check of the audit itself):
 
 ```
- Score: 183 PASS, 0 WARN, 0 FAIL  ->  100% compliant
+ Score: 185 PASS, 0 WARN, 0 FAIL  ->  100% compliant
 ```
 
 ## Honesty
