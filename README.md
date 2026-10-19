@@ -186,6 +186,16 @@ docker exec db-harden-node bash /root/harden.sh --admin-user opsadmin \
 > `sshd-session` process, so Fail2Ban's stock `_COMM=sshd` journal match missed
 > every failure and never banned. The jail now matches on the ssh unit instead.
 
+> And the advice this README gives — **`--dry-run` first, with the flags you
+> will use** — went untested until a job ran it. With an `--admin-user` that
+> does not exist yet, the dry run **died at the key install** (rc 2, no message,
+> none of the plan after it), and its lockout guard **planned
+> `PasswordAuthentication yes`** because the key was not on disk yet, while
+> the real run writes `no`. Both fixed; the e2e now dry-runs with the first
+> pass's exact flags before it, and fails unless the whole plan prints, it
+> plans `PasswordAuthentication no`, the admin user still does not exist and
+> nothing under `/etc`, `/root` or `/home` changed.
+
 The same run also covers **flag behaviour** with
 [`test/scenarios.sh`](test/scenarios.sh) — the lockout guard (no key → password
 auth stays on; `--force-no-password` overrides it), a custom `--ssh-port` (sshd

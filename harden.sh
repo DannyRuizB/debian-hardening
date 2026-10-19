@@ -616,7 +616,15 @@ ensure_admin_user() {
     # install pubkey if given and not already present
     if [ -n "$ADMIN_PUBKEY" ]; then
         local home akf
-        home=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
+        # In a dry run a NEW account was only printed, so getent finds nothing
+        # - and under pipefail + set -e that ended the whole dry run right here,
+        # rc 2, with no message and none of the plan after it (measured). The
+        # home adduser would give it is the one to print.
+        home=$(getent passwd "$ADMIN_USER" | cut -d: -f6) || true
+        if [ -z "$home" ]; then
+            [ "$DRY_RUN" -eq 1 ] || { err "user '$ADMIN_USER' has no home directory - cannot install the key"; return 1; }
+            home="/home/$ADMIN_USER"
+        fi
         akf="$home/.ssh/authorized_keys"
         run install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$home/.ssh"
         if [ "$DRY_RUN" -eq 1 ]; then
@@ -640,7 +648,13 @@ harden_ssh() {
     # there's a usable SSH key (or the user forces it with console access).
     local pw_auth="no"
     local key_owner="${ADMIN_USER:-root}"
-    if ! has_authorized_key "$key_owner" && ! has_authorized_key root; then
+    # A dry run installed nothing, so the --pubkey the real run WILL install
+    # for --admin-user counts as present - otherwise the plan printed the
+    # lockout warnings and "PasswordAuthentication yes" while the real run
+    # writes "no" (measured).
+    local key_coming=0
+    [ "$DRY_RUN" -eq 1 ] && [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PUBKEY" ] && key_coming=1
+    if [ "$key_coming" -eq 0 ] && ! has_authorized_key "$key_owner" && ! has_authorized_key root; then
         if [ "$FORCE_NO_PASSWORD" -eq 1 ]; then
             warn "No authorized_keys found, but --force-no-password set. Disabling password auth anyway."
         else

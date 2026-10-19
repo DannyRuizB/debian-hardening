@@ -386,6 +386,28 @@ jobs:
           echo "before hardening: $res"
           case "$res" in RESULT=ANSWERS*) ;; *) echo "::error::the node does not answer a broadcast ping even at icmp_echo_ignore_broadcasts=0 - its IGNORES after hardening would prove nothing"; exit 1;; esac
 
+      # The README says "always --dry-run first", with the same flags as the
+      # real run - and until this step nothing ran it. With an --admin-user
+      # that does not exist yet it died at the key install (getent under
+      # pipefail, rc 2, no message, no plan after it), and the lockout guard
+      # planned PasswordAuthentication yes because the key was not on disk yet
+      # (measured). Same flags as the first pass; it must finish, plan what the
+      # real run does, and touch nothing.
+      - name: "Dry run with the first pass's flags: the whole plan, nothing changed"
+        run: |
+          docker exec db-harden-node touch /tmp/dry-run-marker
+          sleep 1
+          out=$(docker exec db-harden-node bash /root/harden.sh --dry-run \
+            --admin-user opsadmin \
+            --pubkey "$(cat test/.ssh_ci/id_ci.pub)" -y 2>&1) || { echo "$out" | tail -20; echo "::error::the dry run did not finish"; exit 1; }
+          grep -q 'Done. Review with' <<<"$out" || { echo "::error::the dry run stopped before the end of the plan"; exit 1; }
+          grep -qE '^ +PasswordAuthentication no$' <<<"$out" || { echo "::error::the dry run plans password logins the real run turns off"; exit 1; }
+          echo "dry run: $(grep -c '(dry-run)' <<<"$out") planned actions, plan finished"
+          if docker exec db-harden-node id opsadmin >/dev/null 2>&1; then echo "::error::the dry run created the admin user"; exit 1; fi
+          changed=$(docker exec db-harden-node find /etc /root /home -xdev -newer /tmp/dry-run-marker -print 2>/dev/null || true)
+          [ -z "$changed" ] || { echo "$changed"; echo "::error::the dry run changed files"; exit 1; }
+          echo "nothing under /etc, /root or /home changed, and opsadmin does not exist"
+
       - name: "First pass: run harden.sh inside the node (as root)"
         run: |
           docker exec db-harden-node bash /root/harden.sh \
