@@ -2,7 +2,8 @@
 # fail2ban and unattended-upgrades run as real services) plus sshd. harden.sh
 # is run INSIDE this container as root (via docker exec), exactly as you'd run
 # it on a real box — then the test attacks it over SSH from outside.
-# The README promises Debian 12 and 13; the e2e builds both (DEBIAN=12|13).
+# Debian 13 is what the e2e drills; DEBIAN=12 builds the node the README
+# names as not claimed yet (see Targets), to reproduce its gaps.
 ARG DEBIAN=13
 FROM debian:${DEBIAN}
 

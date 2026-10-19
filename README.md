@@ -145,8 +145,16 @@ sudo fail2ban-client status sshd
 
 ## Targets
 
-Written for Debian 12 (Bookworm) and Debian 13 (Trixie), and should work on
-Debian-based distros that ship `ufw`, `fail2ban` and `unattended-upgrades`. The
+**Debian 13 (Trixie)** — the node the e2e hardens on every push. **Debian 12
+(Bookworm) is not claimed**: this section said "Debian 12 and 13" until a CI
+run on 19/10/2026 hardened a `debian:12` node. There the SSH crypto step used
+to revert itself and ship no policy (OpenSSH 9.2 has no ML-KEM; fixed — the
+step now pins only what `ssh -Q` reports), and five verify checks still fail:
+the 30-day inactivity lock for new accounts, admission through `ssh-users`,
+fail2ban's `NoNewPrivileges`, the yescrypt cost of a fresh hash, and `sudo`
+inheriting the per-session process cap. `DEBIAN=12 ./test/node.sh up` builds
+that node to reproduce them. Other Debian-based distros that ship `ufw`,
+`fail2ban` and `unattended-upgrades` may work; nothing here measures them. The
 script is checked in CI (`bash -n`, ShellCheck — the test harness too — and a bats unit suite); always
 run it with `--dry-run` first against a host you can reach by console.
 
