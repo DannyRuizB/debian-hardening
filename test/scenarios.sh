@@ -909,6 +909,56 @@ fi
 docker rm -f s48 >/dev/null 2>&1
 }
 
+scenario_49() {
+echo "-- 49. One layer at a time: --no-ufw (broadcast pings) ------"
+fresh_node s49
+# Two layers pin icmp_echo_ignore_broadcasts=1 on a hardened box: step 6's
+# drop-in and UFW's own /etc/ufw/sysctl.conf, re-applied on every
+# enable/reload (measured on debian:13). Take UFW away: the planted 0 must
+# still become 1 and the node must still ignore broadcast pings - step 6
+# alone. The knob is per network namespace, so this runs side by side.
+docker exec s49 sysctl -qw net.ipv4.icmp_echo_ignore_broadcasts=0 >/dev/null 2>&1
+docker exec s49 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-ufw -y >/dev/null 2>&1
+if docker exec s49 sh -c 'command -v ufw >/dev/null && ufw status | grep -q "Status: active"' 2>/dev/null; then
+  F "--no-ufw should leave UFW off, or this proves nothing about step 6" "ufw active"
+else
+  P "--no-ufw -> UFW is not active: its sysctl.conf cannot be what sets the knob"
+fi
+got=$(docker exec s49 sysctl -n net.ipv4.icmp_echo_ignore_broadcasts 2>/dev/null)
+[ "$got" = 1 ] && P "step 6 alone turns the planted icmp_echo_ignore_broadcasts=0 into 1" \
+               || F "step 6 should set icmp_echo_ignore_broadcasts=1 without UFW" "$got"
+res=$(./bcast-probe.sh s49)
+case "$res" in
+  RESULT=IGNORES*) P "the node ignores broadcast pings with UFW out of the picture ($res)";;
+  *) F "the node should ignore broadcast pings without UFW" "$res";;
+esac
+docker rm -f s49 >/dev/null 2>&1
+}
+
+scenario_50() {
+echo "-- 50. One layer at a time: --no-sysctl (broadcast pings) ---"
+fresh_node s50
+# The other half of 49: skip step 6 and plant the 0 - UFW's own sysctl.conf
+# must still turn it into 1 when the firewall step enables UFW. Kept as a
+# check, so the "two layers" claim in verify.sh stays measured.
+docker exec s50 sysctl -qw net.ipv4.icmp_echo_ignore_broadcasts=0 >/dev/null 2>&1
+docker exec s50 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --no-sysctl -y >/dev/null 2>&1
+if docker exec s50 test -e /etc/sysctl.d/99-hardening.conf; then
+  F "--no-sysctl should not write the kernel drop-in" "99-hardening.conf exists"
+else
+  P "--no-sysctl -> no 99-hardening.conf (step 6 skipped)"
+fi
+got=$(docker exec s50 sysctl -n net.ipv4.icmp_echo_ignore_broadcasts 2>/dev/null)
+[ "$got" = 1 ] && P "UFW alone turns the planted icmp_echo_ignore_broadcasts=0 into 1 (its own sysctl.conf)" \
+               || F "UFW's sysctl.conf should set icmp_echo_ignore_broadcasts=1" "$got"
+res=$(./bcast-probe.sh s50)
+case "$res" in
+  RESULT=IGNORES*) P "the node ignores broadcast pings without step 6 ($res)";;
+  *) F "the node should ignore broadcast pings through UFW alone" "$res";;
+esac
+docker rm -f s50 >/dev/null 2>&1
+}
+
 # --- Runner ------------------------------------------------------------------
 # Each scenario above owns its container (sN) and removes it, so they can run
 # side by side - except the ones that plant or assert a HOST-GLOBAL sysctl (one
