@@ -2798,6 +2798,20 @@ EOF
 # ---- Main -----------------------------------------------------------------
 # ---- Step 35: SSH crypto policy (CIS 5.2) -----------------------------------
 
+# The algorithms of a comma list that this OpenSSH knows, in the list's order
+# (`ssh -Q`: the client ships with the server, same build). One name sshd does
+# not know makes `sshd -t` refuse the WHOLE drop-in - measured on Debian 12,
+# whose OpenSSH 9.2 has no ML-KEM hybrid: the step reverted itself and the box
+# kept the stock crypto. Without `ssh` the list comes back as written.
+ssh_supported() {
+    local query="$1" want="$2" have out="" a
+    have=$(ssh -Q "$query" 2>/dev/null) || { printf '%s' "$want"; return 0; }
+    for a in ${want//,/ }; do
+        grep -qxF "$a" <<<"$have" && out="${out:+$out,}$a"
+    done
+    printf '%s' "$out"
+}
+
 setup_ssh_crypto() {
     [ "$DO_SSH_CRYPTO" -eq 1 ] || { log "Skipping SSH crypto policy"; return 0; }
     log "Pinning the SSH crypto policy (ciphers, MACs, key exchange)"
@@ -2819,18 +2833,29 @@ setup_ssh_crypto() {
     # sshd_config and sshd honours the FIRST occurrence of a keyword, so
     # this drop-in beats any legacy-compat Ciphers/MACs/Kex line someone
     # left in the main file.
-    local content
-    content=$(cat <<'EOF'
+    # Each list is cut to what this sshd knows (ssh_supported): on Debian 12
+    # the ML-KEM hybrid goes and sntrup761 + curve25519 stay. An empty list
+    # would leave sshd with no choice at all - refused, never written.
+    local ciphers macs kex content
+    ciphers=$(ssh_supported cipher chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr)
+    macs=$(ssh_supported mac hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com)
+    kex=$(ssh_supported kex mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org)
+    if [ -z "$ciphers" ] || [ -z "$macs" ] || [ -z "$kex" ]; then
+        err "this OpenSSH knows none of the pinned ciphers, MACs or key exchanges - crypto policy not written"
+        return 1
+    fi
+    content=$(cat <<EOF
 # Managed by debian-hardening (harden.sh). Edit flags, not this file.
 # Crypto policy: what the transport may negotiate, pinned.
 #
 # AEAD first; ctr kept for compatibility — which is exactly why the MACs
 # line below matters (AEAD ignores the MAC, ctr does not).
-Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+Ciphers ${ciphers}
 # Encrypt-then-MAC only, 128-bit tags or better: no sha1, no umac-64.
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
-# Post-quantum hybrids + curve25519. The NIST P-curve tail is gone.
-KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+MACs ${macs}
+# Post-quantum hybrids + curve25519, as far as this OpenSSH has them. The
+# NIST P-curve tail is gone.
+KexAlgorithms ${kex}
 EOF
 )
     if [ "$DRY_RUN" -eq 1 ]; then
