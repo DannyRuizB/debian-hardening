@@ -2463,9 +2463,26 @@ setup_guess_cost() {
     fi
     # login.defs carries both knobs for the tools that read it: chpasswd -c,
     # newusers and (on Debian 13) pam_unix take the cost factor from there,
-    # and Debian 13's login (util-linux) its FAIL_DELAY.
-    local key val
-    for kv in "YESCRYPT_COST_FACTOR $GUESS_COST_FACTOR" "FAIL_DELAY $GUESS_FAIL_DELAY"; do
+    # and Debian 13's login (util-linux) its FAIL_DELAY. But Debian 12's
+    # shadow (4.13) does not know FAIL_DELAY: with the key in login.defs
+    # EVERY useradd, usermod, passwd and chpasswd printed "configuration
+    # error - unknown item 'FAIL_DELAY' (notify administrator)" (measured),
+    # and nothing there reads it but pam_faildelay - which gets its own
+    # delay= below. Ask shadow first: `useradd -D -K FAIL_DELAY=5` only
+    # prints the defaults with the key overridden - rc 0 on 13, rc 3 and
+    # "unknown item" on 12, nothing written on either (measured) - and keep
+    # the key out where it is unknown.
+    local key val kv
+    local -a pins=("YESCRYPT_COST_FACTOR $GUESS_COST_FACTOR")
+    if useradd -D -K "FAIL_DELAY=$GUESS_FAIL_DELAY" >/dev/null 2>&1; then
+        pins+=("FAIL_DELAY $GUESS_FAIL_DELAY")
+    elif grep -qE '^FAIL_DELAY[[:space:]]' /etc/login.defs; then
+        sed -i '/^FAIL_DELAY[[:space:]]/d' /etc/login.defs
+        ok "this shadow does not know FAIL_DELAY - taken out of login.defs (pam_faildelay carries the delay itself)"
+    else
+        ok "this shadow does not know FAIL_DELAY - kept out of login.defs (pam_faildelay carries the delay itself)"
+    fi
+    for kv in "${pins[@]}"; do
         key="${kv% *}"; val="${kv#* }"
         if grep -qE "^${key}[[:space:]]" /etc/login.defs; then
             sed -i "s/^${key}[[:space:]].*/${key}\t${val}/" /etc/login.defs
@@ -2473,17 +2490,6 @@ setup_guess_cost() {
             printf '%s\t%s\n' "$key" "$val" >> /etc/login.defs
         fi
     done
-    # Debian 12's shadow (4.13) does not know FAIL_DELAY: with the key in
-    # login.defs EVERY useradd, usermod, passwd and chpasswd printed
-    # "configuration error - unknown item 'FAIL_DELAY' (notify
-    # administrator)" (measured), and nothing there reads it but
-    # pam_faildelay - which gets its own delay= below. Ask shadow itself
-    # (`useradd -D` only reads) and take the key out where it is unknown.
-    if command -v useradd >/dev/null 2>&1 \
-        && useradd -D 2>&1 >/dev/null | grep -qF "unknown item 'FAIL_DELAY'"; then
-        sed -i '/^FAIL_DELAY[[:space:]]/d' /etc/login.defs
-        ok "this shadow does not know FAIL_DELAY - kept out of login.defs (pam_faildelay carries the delay itself)"
-    fi
     # The cost factor in login.defs is not enough for PAM everywhere:
     # Debian 12's pam_unix (PAM 1.5.2) ignores YESCRYPT_COST_FACTOR - measured,
     # passwd, chpasswd and newusers all minted the stock $y$j9T$ (cost 5)

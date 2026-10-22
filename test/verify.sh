@@ -839,12 +839,10 @@ expect_line "login.defs pins YESCRYPT_COST_FACTOR 11" '^YESCRYPT_COST_FACTOR[[:s
 # Debian 12's shadow (4.13) rejects FAIL_DELAY - with the key in login.defs
 # every useradd, usermod and passwd printed "unknown item" - so there the
 # step leaves it out and the delay lives on pam_faildelay's own line. Ask
-# shadow which world this is: useradd reads a throwaway login.defs holding
-# only the key (-P with -D is then refused, but the file is read - and
-# judged - first: measured, 12 names FAIL_DELAY, 13 stays quiet and only
-# names a made-up key).
-fd_known=$(on_node 'd=$(mktemp -d); mkdir "$d/etc"; printf "FAIL_DELAY\t5\n" > "$d/etc/login.defs"; out=$(sudo useradd -P "$d" -D 2>&1); rm -rf "$d"; case "$out" in *"unknown item"*FAIL_DELAY*) echo no;; *) echo yes;; esac' 2>/dev/null)
-if [ "$fd_known" = no ]; then
+# shadow which world this is, the way the step does: `useradd -D -K
+# FAIL_DELAY=5` only prints the defaults (rc 0 on 13; rc 3 and "unknown
+# item" on 12; nothing written - measured).
+if ! on_node sudo useradd -D -K FAIL_DELAY=5 >/dev/null 2>&1; then
   if on_node grep -qE '^FAIL_DELAY' /etc/login.defs; then
     fail "login.defs leaves FAIL_DELAY out (this shadow rejects the key)"
   else
