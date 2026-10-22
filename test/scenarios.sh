@@ -719,6 +719,9 @@ docker exec s39 bash /root/harden.sh --admin-user opsadmin --pubkey "$PUBKEY" --
 if docker exec s39 test -f /etc/security/limits.d/99-hardening-nproc.conf 2>/dev/null; then
   F "--no-process-limits should not write the nproc drop-in" "file exists"; else
   P "--no-process-limits -> no nproc drop-in written"; fi
+if docker exec s39 test -e /etc/sudoers.d/99-hardening-nproc 2>/dev/null; then
+  F "--no-process-limits should not write the sudo rlimit drop-in" "file exists"; else
+  P "--no-process-limits -> no sudo rlimit drop-in written"; fi
 got=$(docker exec s39 su -l opsadmin -c 'ulimit -Hu' 2>/dev/null)
 [ "$got" = unlimited ] && P "--no-process-limits -> the admin session stays unlimited (step skipped)" \
                        || F "--no-process-limits should leave the process limit alone" "$got"

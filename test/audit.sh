@@ -819,11 +819,15 @@ ycf=$(ld YESCRYPT_COST_FACTOR)
 [ "$ycf" = "11" ] \
   && P "yescrypt cost factor at maximum (a guess against a stolen hash costs ~1 s)" \
   || W "yescrypt cost factor is ${ycf:-unset} (stock 5: milliseconds per guess)" "set YESCRYPT_COST_FACTOR 11 in login.defs (guess-cost step)"
-fd=$(ld FAIL_DELAY)
+# The delay pam_faildelay applies: its own delay= (microseconds) when the line
+# carries one, login.defs' FAIL_DELAY otherwise (Debian 12's shadow rejects
+# that key, so there the line is the only place it can live).
+pd=$(on_node grep -v '^#' /etc/pam.d/common-auth | grep -oE 'pam_faildelay\.so.*delay=[0-9]+' | grep -oE '[0-9]+$')
+if [ -n "$pd" ]; then fd=$((pd / 1000000)); else fd=$(ld FAIL_DELAY); fi
 if [ -n "$fd" ] && [ "$fd" -ge 4 ] 2>/dev/null; then
   P "failed logins wait ${fd} s before returning (online guessing throttled)"
 else
-  W "FAIL_DELAY is ${fd:-unset}" "set FAIL_DELAY 5 in login.defs (guess-cost step)"
+  W "the fail delay is ${fd:-unset}" "set FAIL_DELAY 5 (guess-cost step)"
 fi
 on_node grep -q pam_faildelay /etc/pam.d/common-auth \
   && P "pam_faildelay is wired into the auth stack" \

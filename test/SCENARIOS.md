@@ -63,7 +63,7 @@ Those run one at a time after the rest. The report comes out in scenario order.
 | 36 | `--no-service-purge` | a planted `rpcbind` survives the run (the fresh node image ships none of the three, so one is installed first), the rest still applies |
 | 37 | `--no-kernel-surface` | a planted `kernel.sysrq=438` (Debian's default, the hotkeys fully open) survives the run and no kernel-surface drop-in is written, the rest still applies — host-global in a privileged container, so the scenario restores the mask it found |
 | 38 | `--no-suid-diet` | `chfn` keeps its shipped setuid bit (4755) and no `dpkg-statoverride` pin appears, the rest still applies |
-| 39 | `--no-process-limits` | no nproc drop-in is written and a login session of the admin user (`su -l`, the same `pam_limits` stack as sshd) stays `unlimited`, the rest still applies |
+| 39 | `--no-process-limits` | neither the nproc drop-in nor the sudo `rlimit_nproc` drop-in is written, a login session of the admin user (`su -l`, the same `pam_limits` stack as sshd) stays `unlimited`, the rest still applies |
 | 40 | `--no-console-reboot` | `ctrl-alt-del.target` stays an alias of `reboot.target` and no `CtrlAltDelBurstAction` drop-in is written, the rest still applies |
 | 41 | `--no-egress` | the UFW outgoing policy stays `allow` and no `ALLOW OUT` rule is written, the rest still applies |
 | 42 | `--no-pam-nullok` | `nullok` survives on the `pam_unix` line of `common-auth` through the whole run (including the other PAM steps' `pam-auth-update` calls), the rest still applies |
@@ -76,7 +76,7 @@ Those run one at a time after the rest. The report comes out in scenario order.
 | 49 | `--no-ufw` | **one layer at a time**: `icmp_echo_ignore_broadcasts` is pinned twice on a hardened box — step 6's drop-in and UFW's own `/etc/ufw/sysctl.conf`, re-applied on every enable. With UFW not active, a planted `0` still becomes `1` and `bcast-probe.sh` sees the node ignore broadcast pings: step 6 alone holds it |
 | 50 | `--no-sysctl` | the other layer: no `99-hardening.conf`, a planted `0`, and UFW's `sysctl.conf` alone turns it into `1` — the node still ignores broadcast pings. Kept as a check so the two-layer claim stays measured |
 
-**Result: 126/126 checks pass.**
+**Result: 127/127 checks pass.**
 
 ## Why the lockout guard scenario matters most
 
