@@ -2436,6 +2436,11 @@ setup_process_isolation() {
     ok "Processes are isolated: no peeking at other users' process lists or memory"
 }
 
+# ---- Step 31: guess cost (yescrypt cost factor + fail delay) ----------------
+GUESS_COST_FACTOR=11
+GUESS_FAIL_DELAY=5
+PAM_COMMON_PASSWORD=/etc/pam.d/common-password
+
 setup_guess_cost() {
     [ "$DO_GUESS_COST" -eq 1 ] || { log "Skipping guess cost"; return 0; }
     log "Raising the cost of a wrong password guess (offline and online)"
@@ -2451,16 +2456,33 @@ setup_guess_cost() {
     # correct password pays neither price — libpam only applies the delay
     # when the authentication ultimately fails.
     if [ "$DRY_RUN" -eq 1 ]; then
-        printf '    %s(dry-run)%s would pin YESCRYPT_COST_FACTOR 11 and FAIL_DELAY 5 in /etc/login.defs\n' "$c_yellow" "$c_reset"
-        printf '    %s(dry-run)%s would enable a pam-auth-update profile wiring pam_faildelay into common-auth\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would pin YESCRYPT_COST_FACTOR 11 and FAIL_DELAY 5 in /etc/login.defs (FAIL_DELAY only where shadow knows the key)\n' "$c_yellow" "$c_reset"
+        printf '    %s(dry-run)%s would pin rounds=11 on the yescrypt pam_unix line of %s\n' "$c_yellow" "$c_reset" "$PAM_COMMON_PASSWORD"
+        printf '    %s(dry-run)%s would enable a pam-auth-update profile wiring pam_faildelay (delay=%s) into common-auth\n' "$c_yellow" "$c_reset" "$((GUESS_FAIL_DELAY * 1000000))"
         return 0
     fi
-    # Both knobs live in login.defs — chpasswd, newusers AND pam_unix read
-    # the cost factor from there (verified empirically: a PAM password
-    # change also lands a $y$jFT$ hash), and pam_faildelay without inline
-    # arguments falls back to FAIL_DELAY. One file, one source of truth.
-    local key val
-    for kv in "YESCRYPT_COST_FACTOR 11" "FAIL_DELAY 5"; do
+    # login.defs carries both knobs for the tools that read it: chpasswd -c,
+    # newusers and (on Debian 13) pam_unix take the cost factor from there,
+    # and Debian 13's login (util-linux) its FAIL_DELAY. But Debian 12's
+    # shadow (4.13) does not know FAIL_DELAY: with the key in login.defs
+    # EVERY useradd, usermod, passwd and chpasswd printed "configuration
+    # error - unknown item 'FAIL_DELAY' (notify administrator)" (measured),
+    # and nothing there reads it but pam_faildelay - which gets its own
+    # delay= below. Ask shadow first: `useradd -D -K FAIL_DELAY=5` only
+    # prints the defaults with the key overridden - rc 0 on 13, rc 3 and
+    # "unknown item" on 12, nothing written on either (measured) - and keep
+    # the key out where it is unknown.
+    local key val kv
+    local -a pins=("YESCRYPT_COST_FACTOR $GUESS_COST_FACTOR")
+    if useradd -D -K "FAIL_DELAY=$GUESS_FAIL_DELAY" >/dev/null 2>&1; then
+        pins+=("FAIL_DELAY $GUESS_FAIL_DELAY")
+    elif grep -qE '^FAIL_DELAY[[:space:]]' /etc/login.defs; then
+        sed -i '/^FAIL_DELAY[[:space:]]/d' /etc/login.defs
+        ok "this shadow does not know FAIL_DELAY - taken out of login.defs (pam_faildelay carries the delay itself)"
+    else
+        ok "this shadow does not know FAIL_DELAY - kept out of login.defs (pam_faildelay carries the delay itself)"
+    fi
+    for kv in "${pins[@]}"; do
         key="${kv% *}"; val="${kv#* }"
         if grep -qE "^${key}[[:space:]]" /etc/login.defs; then
             sed -i "s/^${key}[[:space:]].*/${key}\t${val}/" /etc/login.defs
@@ -2468,6 +2490,31 @@ setup_guess_cost() {
             printf '%s\t%s\n' "$key" "$val" >> /etc/login.defs
         fi
     done
+    # The cost factor in login.defs is not enough for PAM everywhere:
+    # Debian 12's pam_unix (PAM 1.5.2) ignores YESCRYPT_COST_FACTOR - measured,
+    # passwd, chpasswd and newusers all minted the stock $y$j9T$ (cost 5)
+    # with the pin in place; only `chpasswd -c YESCRYPT` honoured it. rounds=
+    # on the pam_unix line is the cost every PAM password change uses (12:
+    # all three then mint $y$jFT$; 13: unchanged, already $y$jFT$). Only on a
+    # yescrypt line - for sha512 the same rounds=11 would mean 1000 rounds,
+    # below its default 5000. Edited in place, like step 50's nullok: measured
+    # on Debian 12, pam-auth-update records an added option as a local
+    # modification and re-applies it - the line kept rounds=11 through
+    # `pam-auth-update --force` and a libpam-runtime reinstall.
+    if [ ! -f "$PAM_COMMON_PASSWORD" ]; then
+        warn "$PAM_COMMON_PASSWORD not found - pam_unix's cost not pinned"
+    elif ! grep -Eq '^[^#]*pam_unix\.so.*[[:space:]]yescrypt([[:space:]]|$)' "$PAM_COMMON_PASSWORD"; then
+        warn "pam_unix in $PAM_COMMON_PASSWORD does not mint yescrypt - its cost is left alone"
+    elif grep -Eq "^[^#]*pam_unix\.so.*[[:space:]]rounds=${GUESS_COST_FACTOR}([[:space:]]|$)" "$PAM_COMMON_PASSWORD"; then
+        ok "pam_unix already mints yescrypt at cost $GUESS_COST_FACTOR"
+    else
+        sed -i -E "/^[^#]*pam_unix\.so/ { s/[[:space:]]+rounds=[0-9]+//; s/[[:space:]]*\$/ rounds=${GUESS_COST_FACTOR}/ }" "$PAM_COMMON_PASSWORD"
+        if command -v pam-auth-update >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive pam-auth-update --package >/dev/null 2>&1 \
+                || warn "pam-auth-update could not absorb the pam_unix rounds"
+        fi
+        ok "pam_unix now mints yescrypt at cost $GUESS_COST_FACTOR (rounds=$GUESS_COST_FACTOR)"
+    fi
     # Existing hashes keep the cost they were minted with — only the next
     # password change re-hashes. The admin user this script installs is
     # key-only (locked password), so nothing needs re-hashing here.
@@ -2476,21 +2523,23 @@ setup_guess_cost() {
     # guess has actually been judged) but before anything that ends the
     # stack — faillock's authfail dies, and Debian's closing pam_deny is
     # requisite. A line appended after those never runs. Priority 128 puts
-    # it exactly there: below pam_unix (256), above authfail (0).
+    # it exactly there: below pam_unix (256), above authfail (0). The delay
+    # is on the module's own line (microseconds): without it pam_faildelay
+    # falls back to login.defs' FAIL_DELAY, which Debian 12 cannot carry.
     install -d -m 755 /usr/share/pam-configs
-    cat > /usr/share/pam-configs/hardening-faildelay <<'EOF'
+    cat > /usr/share/pam-configs/hardening-faildelay <<EOF
 Name: Fail delay — every wrong guess waits (debian-hardening)
 Default: yes
 Priority: 128
 Auth-Type: Primary
 Auth:
-	optional			pam_faildelay.so
+	optional			pam_faildelay.so delay=$((GUESS_FAIL_DELAY * 1000000))
 EOF
     if command -v pam-auth-update >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive pam-auth-update --package \
             --enable hardening-faildelay \
             || warn "pam-auth-update could not enable the faildelay profile"
-        ok "wrong guesses now cost ~1 s of CPU offline and a $(grep -E '^FAIL_DELAY' /etc/login.defs | awk '{print $2}')-second wait live"
+        ok "wrong guesses now cost ~1 s of CPU offline and a ${GUESS_FAIL_DELAY}-second wait live"
     else
         warn "pam-auth-update not found — faildelay profile written but not wired"
     fi
@@ -3738,6 +3787,7 @@ setup_suid_diet() {
 
 # ---- Step 47: per-session process limits (fork bombs) ------------------------
 NPROC_DROPIN=/etc/security/limits.d/99-hardening-nproc.conf
+NPROC_SUDO_DROPIN=/etc/sudoers.d/99-hardening-nproc
 NPROC_LIMIT=4096
 
 setup_process_limits() {
@@ -3755,12 +3805,15 @@ setup_process_limits() {
     # keep their own DefaultTasksMax. The hard limit is the promise:
     # measured, a capped session can lower and re-raise its soft limit up to
     # the hard one, but `ulimit -u 8192` above it is "Operation not
-    # permitted". And measured against the obvious escape: rlimits are
-    # INHERITED, so `sudo` from a capped session stays capped at 4096 - an
-    # explicit `root ... unlimited` line does not lift it (pam_limits in
-    # sudo's stack cannot raise what the parent already lowered). The cap
-    # follows the session, sudo included; a root login of its own is the
-    # unthrottled path.
+    # permitted". And the obvious escape, sudo: rlimits are inherited, but
+    # sudo itself lifts nproc to unlimited while it switches users and
+    # restores the caller's value before exec "unless the limit appears to
+    # have been modified by pam_limits" (sudo's NEWS). Measured: Debian 13
+    # (sudo 1.9.16, PAM 1.7) restored 4096; Debian 12 (sudo 1.9.13, PAM
+    # 1.5.2) handed the sudo shell UNLIMITED. `Defaults rlimit_nproc=user`
+    # says it outright - keep the invoking user's limit - and both then give
+    # 4096 through sudo, sudo -i and sudo -u (root can still raise its own
+    # limit on purpose; a root login of its own stays unthrottled).
     local content
     content=$(cat <<EOF
 # Managed by debian-hardening (harden.sh). Edit flags, not this file.
@@ -3772,6 +3825,7 @@ EOF
 )
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would write %s (soft/hard nproc %s for every non-root session)\n' "$c_yellow" "$c_reset" "$NPROC_DROPIN" "$NPROC_LIMIT"
+        printf '    %s(dry-run)%s would write %s: Defaults rlimit_nproc=user (sudo keeps the caller'"'"'s cap)\n' "$c_yellow" "$c_reset" "$NPROC_SUDO_DROPIN"
         return 0
     fi
     if [ -f "$NPROC_DROPIN" ] && [ "$(cat "$NPROC_DROPIN")" = "$content" ]; then
@@ -3781,6 +3835,24 @@ EOF
         printf '%s\n' "$content" > "$NPROC_DROPIN"
         chmod 644 "$NPROC_DROPIN"
         ok "Wrote $NPROC_DROPIN: every new non-root session gets nproc $NPROC_LIMIT (hard)"
+    fi
+    local sudo_content='Defaults rlimit_nproc=user'
+    if [ -f "$NPROC_SUDO_DROPIN" ] && [ "$(cat "$NPROC_SUDO_DROPIN")" = "$sudo_content" ]; then
+        ok "sudo already keeps the caller's process cap"
+    else
+        local tmp
+        tmp=$(mktemp)
+        printf '%s\n' "$sudo_content" > "$tmp"
+        # Validated before it goes live, like every sudoers change here.
+        if visudo -cf "$tmp" >/dev/null 2>&1; then
+            install -m 440 -o root -g root "$tmp" "$NPROC_SUDO_DROPIN"
+            rm -f "$tmp"
+            ok "Wrote $NPROC_SUDO_DROPIN: sudo keeps the caller's nproc cap"
+        else
+            rm -f "$tmp"
+            err "Generated sudoers drop-in failed visudo validation - not installing"
+            return 1
+        fi
     fi
     # The drop-in only bites if pam_limits sits in the session stacks. Debian
     # ships it in sshd/login/su/sudo; report, never edit, if a stack lost it.
