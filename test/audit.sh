@@ -26,7 +26,18 @@ F() { printf "  \033[31mFAIL\033[0m  %s\n         -> %s\n" "$1" "$2"; fail=$((fa
 # Cache the effective SSH config once; val <key> returns the effective value.
 sshd_conf=$(docker exec "$NODE" sshd -T 2>/dev/null)
 val() { echo "$sshd_conf" | awk -v k="$1" 'tolower($1)==k{print $2; exit}'; }
-on_node() { docker exec "$NODE" "$@" 2>/dev/null; }
+# `on_node cmd | grep -q x` under pipefail: grep -q hangs up on its first
+# match, and a writer with more to send dies of SIGPIPE (141) - the pipeline
+# then "fails" although the line was there. `apt-config dump | grep -qF` lost
+# that race 53 times in 200 on Debian 12 and 0 on 13 (measured; the writer
+# 141, grep 0). grep -q only hangs up after it has decided, so a 141 here
+# hands the verdict to the reader: one fix for every pipeline below.
+on_node() {
+  docker exec "$NODE" "$@" 2>/dev/null
+  local rc=$?
+  [ "$rc" -eq 141 ] && return 0
+  return "$rc"
+}
 # Effective kernel value for a sysctl key (empty if the key doesn't exist).
 sctl() { docker exec "$NODE" sysctl -n "$1" 2>/dev/null; }
 
