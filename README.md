@@ -146,7 +146,8 @@ sudo fail2ban-client status sshd
 ## Targets
 
 **Debian 13 (Trixie) and Debian 12 (Bookworm)** — the e2e hardens, re-runs
-and verifies a node of each on every push (one Dockerfile, `ARG DEBIAN`;
+and verifies a node of each on every push and again every week, against the
+images as Docker Hub ships them that day (one Dockerfile, `ARG DEBIAN`;
 `DEBIAN=12 ./test/node.sh up` builds the 12 one). Debian 12 was promised long
 before it was drilled; the first run on it found where the two differ, and
 no fix switches on a version number: OpenSSH 9.2
@@ -175,7 +176,8 @@ bats test/          # needs bats-core (apt install bats, or brew install bats-co
 ### End-to-end (it actually hardens a box)
 
 Linting proves the script *parses*; the [`e2e` workflow](.github/workflows/e2e.yml)
-proves it *hardens*. On every push it boots a disposable Debian 13 and a Debian
+proves it *hardens*. On every push — and every Monday, because the base images
+move under a green `main` — it boots a disposable Debian 13 and a Debian
 12 systemd container, runs `harden.sh` inside each for real, runs it again to prove
 idempotence (the config files' hashes must not change), and then attacks the
 result from the outside with [`test/verify.sh`](test/verify.sh): root login
