@@ -168,3 +168,55 @@ SCRIPT="${BATS_TEST_DIRNAME}/../harden.sh"
   [[ "$output" != *"daemonish"* ]]
   [[ "$output" != *"ghost"* ]]
 }
+
+# ---- sshd_reclaim (sshd precedence: pure file edit, probed in isolation) ---
+# sshd keeps the FIRST value it reads; a drop-in named before ours (cloud-init
+# writes 50-cloud-init.conf) or a main-file line above the Include wins. The
+# helper is pointed at a scratch tree through SSHD_MAIN_CONFIG/SSHD_DROPIN_DIR.
+
+reclaim_tree() {
+  T="$BATS_TEST_TMPDIR/ssh"
+  mkdir -p "$T/sshd_config.d"
+  printf 'ClientAliveInterval 0\nInclude %s/sshd_config.d/*.conf\nMaxAuthTries 9\n' "$T" > "$T/sshd_config"
+  printf 'PasswordAuthentication yes\n' > "$T/sshd_config.d/50-cloud-init.conf"
+  printf 'x11forwarding=yes\n  MaxAuthTries 4\nPort 2222\n\nMatch User deploy\n    PasswordAuthentication yes\n' > "$T/sshd_config.d/10-legacy.conf"
+  printf 'X11Forwarding yes\n' > "$T/sshd_config.d/zz-after.conf"
+  OURS="$T/sshd_config.d/99-hardening.conf"
+  CONTENT=$'# managed\nPort 22\nPasswordAuthentication no\nX11Forwarding no\nMaxAuthTries 4\nClientAliveInterval 300'
+}
+
+@test "sshd_reclaim comments out only what is read first, differs, and sits outside Match" {
+  reclaim_tree
+  run bash -c "source '$SCRIPT'; SSHD_MAIN_CONFIG='$T/sshd_config'; SSHD_DROPIN_DIR='$T/sshd_config.d'; sshd_reclaim '$OURS' \"\$1\" 2>/dev/null; echo \"n=\$SSHD_RECLAIMED\"" _ "$CONTENT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"n=3"* ]]
+  # cloud-init's yes, the key=value x11 line and the main-file line above the Include.
+  grep -qx '# debian-hardening (shadowed 99-hardening.conf): PasswordAuthentication yes' "$T/sshd_config.d/50-cloud-init.conf"
+  grep -qx '# debian-hardening (shadowed 99-hardening.conf): x11forwarding=yes' "$T/sshd_config.d/10-legacy.conf"
+  grep -qx '# debian-hardening (shadowed 99-hardening.conf): ClientAliveInterval 0' "$T/sshd_config"
+  # Same value as ours: left. Port: left (named, never cut). Match: left.
+  grep -qx '  MaxAuthTries 4' "$T/sshd_config.d/10-legacy.conf"
+  grep -qx 'Port 2222' "$T/sshd_config.d/10-legacy.conf"
+  grep -qx '    PasswordAuthentication yes' "$T/sshd_config.d/10-legacy.conf"
+  # Below the Include, and a drop-in sorting AFTER ours: ours already wins there.
+  grep -qx 'MaxAuthTries 9' "$T/sshd_config"
+  grep -qx 'X11Forwarding yes' "$T/sshd_config.d/zz-after.conf"
+}
+
+@test "sshd_reclaim names an extra Port without touching it, and a second run changes nothing" {
+  reclaim_tree
+  run bash -c "source '$SCRIPT'; SSHD_MAIN_CONFIG='$T/sshd_config'; SSHD_DROPIN_DIR='$T/sshd_config.d'; sshd_reclaim '$OURS' \"\$1\"; sshd_reclaim '$OURS' \"\$1\" 2>&1; echo \"n=\$SSHD_RECLAIMED\"" _ "$CONTENT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"listens on 'Port 2222'"* ]]
+  [[ "$output" == *"n=0"* ]]
+}
+
+@test "sshd_reclaim in a dry run plans the lines and leaves every file alone" {
+  reclaim_tree
+  before=$(cat "$T/sshd_config" "$T"/sshd_config.d/*.conf | sha256sum)
+  run bash -c "source '$SCRIPT'; DRY_RUN=1; SSHD_MAIN_CONFIG='$T/sshd_config'; SSHD_DROPIN_DIR='$T/sshd_config.d'; sshd_reclaim '$OURS' \"\$1\" 2>/dev/null; echo \"n=\$SSHD_RECLAIMED\"" _ "$CONTENT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would comment out $T/sshd_config.d/50-cloud-init.conf:1"* ]]
+  [[ "$output" == *"n=3"* ]]
+  [ "$before" = "$(cat "$T/sshd_config" "$T"/sshd_config.d/*.conf | sha256sum)" ]
+}

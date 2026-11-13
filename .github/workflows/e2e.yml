@@ -403,6 +403,28 @@ jobs:
           echo "before hardening: $res"
           case "$res" in RESULT=ANSWERS*) ;; *) echo "::error::the node does not answer a broadcast ping even at icmp_echo_ignore_broadcasts=0 - its IGNORES after hardening would prove nothing"; exit 1;; esac
 
+      # sshd precedence, for every SSH step at once: most keywords are
+      # first-wins and Debian reads sshd_config.d in lexical order, so a
+      # drop-in named before the 9x- ones beats them silently. Measured on
+      # debian:13: Debian's cloud-init (25.1.4) writes exactly this
+      # 50-cloud-init.conf, and next to the 99- drop-in saying "no" sshd kept
+      # password logins ON while harden.sh said "applied". The legacy drop-in
+      # shadows steps 2, 7, 11, 34 (AllowGroups accumulates), 35 and 51 -
+      # key=value and odd case included - and ends in a Match block that must
+      # be left alone; the main-file line sits ABOVE the Include. Planted after
+      # step 51's keyscan so that log keeps showing the image as shipped.
+      - name: Plant sshd lines read BEFORE the hardening drop-ins (cloud-init's and a legacy one)
+        run: |
+          docker exec db-harden-node bash -c '
+            printf "PasswordAuthentication yes\n" > /etc/ssh/sshd_config.d/50-cloud-init.conf &&
+            printf "X11Forwarding yes\nMaxAuthTries 10\n  AllowTcpForwarding yes\nloglevel=QUIET\nLoginGraceTime 2m\nBanner none\nHostKeyAlgorithms ecdsa-sha2-nistp256,ssh-ed25519\nAllowGroups adm\nCiphers aes128-ctr\n\nMatch User nobody\n    X11Forwarding yes\n" > /etc/ssh/sshd_config.d/10-legacy.conf &&
+            sed -i "1i ClientAliveInterval 0" /etc/ssh/sshd_config &&
+            sshd -t'
+          eff=$(docker exec db-harden-node sshd -T)
+          echo "sshd uses as planted: $(grep -E '^(passwordauthentication|x11forwarding|maxauthtries|allowtcpforwarding|loglevel|logingracetime|banner|hostkeyalgorithms|allowgroups|ciphers|clientaliveinterval) ' <<<"$eff" | tr '\n' ';')"
+          grep -qx 'maxauthtries 10' <<<"$eff" && grep -qx 'allowgroups adm' <<<"$eff" && grep -qx 'clientaliveinterval 0' <<<"$eff" \
+            || { echo "::error::sshd does not read the planted lines - the precedence check after hardening would prove nothing"; exit 1; }
+
       # The README says "always --dry-run first", with the same flags as the
       # real run - and until this step nothing ran it. With an --admin-user
       # that does not exist yet it died at the key install (getent under
@@ -419,6 +441,7 @@ jobs:
             --pubkey "$(cat test/.ssh_ci/id_ci.pub)" -y 2>&1) || { echo "$out" | tail -20; echo "::error::the dry run did not finish"; exit 1; }
           grep -q 'Done. Review with' <<<"$out" || { echo "::error::the dry run stopped before the end of the plan"; exit 1; }
           grep -qE '^ +PasswordAuthentication no$' <<<"$out" || { echo "::error::the dry run plans password logins the real run turns off"; exit 1; }
+          grep -q 'would comment out /etc/ssh/sshd_config.d/50-cloud-init.conf:1' <<<"$out" || { echo "::error::the dry run does not plan reclaiming cloud-init's PasswordAuthentication"; exit 1; }
           echo "dry run: $(grep -c '(dry-run)' <<<"$out") planned actions, plan finished"
           if docker exec db-harden-node id opsadmin >/dev/null 2>&1; then echo "::error::the dry run created the admin user"; exit 1; fi
           changed=$(docker exec db-harden-node find /etc /root /home -xdev -newer /tmp/dry-run-marker -print 2>/dev/null || true)
@@ -453,7 +476,7 @@ jobs:
 
       - name: "Second pass: idempotence (config files must not change)"
         run: |
-          files="/etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab /usr/share/pam-configs/hardening-pwhistory /etc/pam.d/common-password /etc/security/opasswd /etc/ssh/sshd_config.d/95-hardening-crypto.conf /etc/sysctl.d/99-hardening-fs.conf /etc/shadow /etc/group /etc/sysctl.d/99-hardening-exploit.conf /etc/systemd/timesyncd.conf.d/99-hardening.conf /etc/apt/apt.conf.d/99-hardening-apt-trust /etc/apt/apt.conf.d/99-hardening-logperms /etc/sysctl.d/99-hardening-kernel-surface.conf /var/lib/dpkg/statoverride /etc/security/limits.d/99-hardening-nproc.conf /etc/systemd/system/ctrl-alt-del.target /etc/systemd/system.conf.d/99-hardening-ctrlaltdel.conf /etc/default/ufw /etc/ufw/user.rules /etc/ufw/user6.rules /etc/ssh/sshd_config.d/96-hardening-hostkeys.conf /etc/sudoers.d/99-hardening-timestamp /etc/sudoers.d/99-hardening-nproc /etc/sysctl.d/99-hardening-loopback.conf /etc/ufw/before.rules /etc/sysctl.d/99-hardening-arp.conf /etc/sysctl.d/99-hardening-arp-spoof.conf /etc/sysctl.d/99-hardening-tiocsti.conf"
+          files="/etc/ssh/sshd_config /etc/ssh/sshd_config.d/50-cloud-init.conf /etc/ssh/sshd_config.d/10-legacy.conf /etc/ssh/sshd_config.d/99-hardening.conf /etc/fail2ban/jail.local /etc/apt/apt.conf.d/20auto-upgrades /etc/sysctl.d/99-hardening.conf /etc/login.defs /etc/default/useradd /etc/fstab /etc/issue /etc/issue.net /etc/motd /etc/ssh/sshd_config.d/98-banner.conf /etc/sudoers.d/99-hardening-sudo /etc/ssh/sshd_config.d/97-hardening-policies.conf /etc/security/limits.d/99-hardening-coredumps.conf /etc/systemd/coredump.conf.d/99-hardening.conf /etc/profile.d/99-hardening-umask.sh /etc/profile.d/99-hardening-tmout.sh /etc/cron.allow /etc/security/pwquality.conf /etc/aide/hardening.conf /etc/systemd/system/aide-check.timer /etc/default/rkhunter /etc/systemd/system/rkhunter-check.timer /etc/modprobe.d/99-hardening-blacklist.conf /etc/security/faillock.conf /etc/pam.d/su /etc/passwd /etc/rsyslog.d/99-hardening.conf /etc/logrotate.conf /etc/logrotate.d/dpkg /etc/logrotate.d/dh-rotated /etc/audit/rules.d/hardening.rules /etc/audit/auditd.conf /etc/sysctl.d/99-hardening-process.conf /usr/share/pam-configs/hardening-faildelay /etc/pam.d/common-auth /etc/profile /etc/crontab /usr/share/pam-configs/hardening-pwhistory /etc/pam.d/common-password /etc/security/opasswd /etc/ssh/sshd_config.d/95-hardening-crypto.conf /etc/sysctl.d/99-hardening-fs.conf /etc/shadow /etc/group /etc/sysctl.d/99-hardening-exploit.conf /etc/systemd/timesyncd.conf.d/99-hardening.conf /etc/apt/apt.conf.d/99-hardening-apt-trust /etc/apt/apt.conf.d/99-hardening-logperms /etc/sysctl.d/99-hardening-kernel-surface.conf /var/lib/dpkg/statoverride /etc/security/limits.d/99-hardening-nproc.conf /etc/systemd/system/ctrl-alt-del.target /etc/systemd/system.conf.d/99-hardening-ctrlaltdel.conf /etc/default/ufw /etc/ufw/user.rules /etc/ufw/user6.rules /etc/ssh/sshd_config.d/96-hardening-hostkeys.conf /etc/sudoers.d/99-hardening-timestamp /etc/sudoers.d/99-hardening-nproc /etc/sysctl.d/99-hardening-loopback.conf /etc/ufw/before.rules /etc/sysctl.d/99-hardening-arp.conf /etc/sysctl.d/99-hardening-arp-spoof.conf /etc/sysctl.d/99-hardening-tiocsti.conf"
           before=$(docker exec db-harden-node sha256sum $files)
           docker exec db-harden-node bash /root/harden.sh \
             --admin-user opsadmin \
