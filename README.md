@@ -28,7 +28,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 | Step | Detail |
 |---|---|
 | **Admin user** | Optional: create a sudo user, install your SSH public key, and grant passwordless sudo (the user has no password, so otherwise couldn't escalate). |
-| **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port, plus CIS extras (`MaxAuthTries`, `X11Forwarding no`, `LoginGraceTime`, idle timeout). Validates with `sshd -t` before reloading. |
+| **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port, plus CIS extras (`MaxAuthTries`, `X11Forwarding no`, `LoginGraceTime`, idle timeout). Validates with `sshd -t` before reloading, and every SSH step reclaims its keywords from any file sshd reads first — see [sshd precedence](#sshd-precedence-the-drop-ins-must-actually-win). |
 | **Firewall** | UFW: default deny incoming, allow SSH (and any extra ports you pass). |
 | **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5, journal match on the ssh unit (works with OpenSSH ≥ 9.8's `sshd-session`). |
 | **Updates** | `unattended-upgrades` for automatic security patches. |
@@ -91,6 +91,36 @@ The script **will not disable SSH password authentication** unless it finds an
 Pass `--pubkey` to install a key first, or `--force-no-password` if you have
 console access and know what you're doing.
 
+### sshd precedence: the drop-ins must actually win
+
+`sshd -t` checks syntax, not who won. For most keywords sshd keeps the **first**
+value it reads, and Debian includes `sshd_config.d` at the top of
+`sshd_config`, in lexical order — so the `95-`…`99-` drop-ins this script writes
+**lose** to any drop-in named before them, and to a line above the `Include`.
+**Measured** on debian:13 (OpenSSH 10.0p1): Debian's own cloud-init (25.1.4)
+writes `sshd_config.d/50-cloud-init.conf` with `PasswordAuthentication yes`, and
+next to `99-hardening.conf` saying `no` sshd **kept password logins on** while
+the script reported *SSH config applied*. With a `10-legacy.conf` planted next
+to it, the effective config after a full run still had `X11Forwarding yes`,
+`MaxAuthTries 10`, `LogLevel QUIET`, `Banner none`, `Ciphers aes128-ctr`, ECDSA
+first in `HostKeyAlgorithms` and `AllowGroups adm` *next to* `ssh-users` —
+`AllowGroups` and `HostKey` don't shadow, they **accumulate**.
+
+So every SSH step now reclaims its keywords: a line read before its drop-in,
+with a value that isn't the step's, is **commented out — never deleted** —
+behind `# debian-hardening (shadowed <drop-in>): `, and after the reload the
+step compares `sshd -T` with what it wrote and names any keyword that still
+loses. Left alone, on purpose: **`Port`** (another listening port may be
+someone's way in right now — it is named, not cut; the firewall decides who
+reaches it), **`Match` blocks** (they apply per connection; nothing from a
+file's first `Match` on is touched), a line with the **same value**, and the
+password fallback of the lockout guard (an earlier `PasswordAuthentication no`
+is someone already logging in by key). cloud-init writes its file once per
+instance; a second write appends a fresh line, and the next run reclaims it.
+The CI plants both files and the main-file line; `verify.sh` checks **every
+keyword line of every hardening drop-in** against `sshd -T`, so a keyword added
+tomorrow is covered the day it is written.
+
 ## What this demonstrates
 
 - **Automation & idempotency** — every step checks state before acting; safe to
@@ -98,7 +128,8 @@ console access and know what you're doing.
 - **Linux security baseline** — SSH hardening, host firewall, brute-force
   protection and patch automation, the way you'd actually set up a server.
 - **Defensive scripting** — `set -euo pipefail`, root/OS preflight checks,
-  config validation (`sshd -t`) before reload, and a lockout safeguard.
+  config validation (`sshd -t`) before reload, a check that sshd *uses* what
+  was written (`sshd -T`), and a lockout safeguard.
 
 ## Usage
 

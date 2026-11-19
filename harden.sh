@@ -458,6 +458,116 @@ run() {
     fi
 }
 
+# ---- sshd precedence ------------------------------------------------------
+# Every sshd keyword a step writes must be the one sshd USES, and `sshd -t`
+# cannot tell: it checks syntax, not who won. For most keywords sshd keeps
+# the FIRST value it reads, and Debian includes sshd_config.d at the TOP of
+# sshd_config, in lexical order - so a drop-in named before ours, or a line
+# above that Include, silently beats the 9x- files this script writes.
+# Measured on debian:13 (openssh 10.0p1): Debian's own cloud-init (25.1.4)
+# writes sshd_config.d/50-cloud-init.conf with "PasswordAuthentication yes",
+# and next to a 99- drop-in saying "no" the effective value stayed YES; a
+# 10-admin.conf won X11Forwarding and MaxAuthTries the same way, and
+# `key=value` or odd case counts too. HostKey and AllowGroups do not shadow,
+# they ACCUMULATE: an earlier "AllowGroups admins" let that group in next to
+# ours.
+#
+# sshd_reclaim comments out (never deletes) each such line whose value is not
+# ours, with a marker naming the drop-in it shadowed - the original text stays
+# in place to read or restore. Ours winning is what the drop-ins already do to
+# the main file below its Include; this makes it independent of file names.
+# Left alone, said out loud:
+#   - Port: another Port line is another listening socket someone may be on
+#     right now - cutting it could lock them out. Named, not touched (the
+#     firewall decides who reaches it).
+#   - Match blocks apply per connection, not globally: nothing is touched from
+#     a file's first Match on.
+#   - a value identical to ours changes nothing, so its file is not rewritten.
+# cloud-init writes its file once per instance; measured, a second write
+# appends a fresh line under the commented one - the next run reclaims it.
+SSHD_MAIN_CONFIG=/etc/ssh/sshd_config
+SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
+SSHD_RECLAIMED=0
+
+# sshd_reclaim DROPIN CONTENT - CONTENT is what the step writes to DROPIN.
+# Sets SSHD_RECLAIMED to the lines commented out (in a dry run: planned).
+sshd_reclaim() {
+    local ours="$1" content="$2" base kw val f n hit text ismain
+    local -A rk_want=()
+    local -a before=() sedx=()
+    base=${ours##*/}
+    SSHD_RECLAIMED=0
+    while read -r kw val; do
+        case "$kw" in ''|'#'*) continue ;; esac
+        kw=${kw,,}
+        rk_want[$kw]+="|${val,,}|"
+    done <<<"$content"
+    [ "${#rk_want[@]}" -gt 0 ] || return 0
+    # What sshd reads before DROPIN: the main file above its Include, then the
+    # drop-ins whose names sort before it (glob order, C collation).
+    [ -f "$SSHD_MAIN_CONFIG" ] && before+=("$SSHD_MAIN_CONFIG")
+    while IFS= read -r f; do
+        [ "$f" = "$base" ] && break
+        before+=("$SSHD_DROPIN_DIR/$f")
+    done < <({ printf '%s\n' "$base"
+               for f in "$SSHD_DROPIN_DIR"/*.conf; do [ -f "$f" ] && printf '%s\n' "${f##*/}"; done
+             } | LC_ALL=C sort -u)
+    for f in "${before[@]}"; do
+        sedx=()
+        ismain=0
+        [ "$f" != "$SSHD_MAIN_CONFIG" ] || ismain=1
+        while IFS=$'\t' read -r n kw text; do
+            [ -n "$n" ] || continue
+            if [ "$kw" = port ]; then
+                warn "sshd also listens on '$text' ($f:$n) - left alone: another port may be someone's way in right now"
+                continue
+            fi
+            SSHD_RECLAIMED=$((SSHD_RECLAIMED + 1))
+            if [ "$DRY_RUN" -eq 1 ]; then
+                printf '    %s(dry-run)%s would comment out %s:%s "%s" - it shadows %s\n' \
+                    "$c_yellow" "$c_reset" "$f" "$n" "$text" "$base"
+            else
+                sedx+=(-e "${n}s|^|# debian-hardening (shadowed $base): |")
+                warn "commented out $f:$n \"$text\" - read before $base, it was the value sshd used"
+            fi
+        done < <(awk -v main="$ismain" '
+            NR == FNR { split($0, p, "\t"); want[p[1]] = p[2]; next }
+            {
+                low = tolower($0)
+                if (low ~ /^[[:space:]]*match([[:space:]]|$)/) exit
+                if (main && low ~ /^[[:space:]]*include[[:space:]]/) exit
+                sub(/^[[:space:]]+/, "", low)
+                if (low == "" || low ~ /^#/) next
+                kw = low; sub(/[[:space:]=].*$/, "", kw)
+                if (!(kw in want)) next
+                val = low; sub(/^[^[:space:]=]+[[:space:]]*=?[[:space:]]*/, "", val)
+                sub(/[[:space:]]+$/, "", val); gsub(/[[:space:]]+/, " ", val)
+                if (index(want[kw], "|" val "|")) next
+                text = $0; sub(/^[[:space:]]+/, "", text)
+                print FNR "\t" kw "\t" text
+            }' <(for hit in "${!rk_want[@]}"; do printf '%s\t%s\n' "$hit" "${rk_want[$hit]}"; done) "$f")
+        [ "${#sedx[@]}" -eq 0 ] || sed -i "${sedx[@]}" "$f"
+    done
+    return 0
+}
+
+# sshd_confirm CONTENT - after the reload: name every keyword of CONTENT whose
+# EFFECTIVE value (sshd -T) is not the one written. The step said "applied";
+# this is the check that it is true. Port, HostKey and AllowGroups accumulate,
+# so they are verified as sets elsewhere (verify.sh), not here.
+sshd_confirm() {
+    local content="$1" kw val eff effconf
+    effconf=$(sshd -T 2>/dev/null) || return 0
+    while read -r kw val; do
+        case "${kw,,}" in ''|'#'*|port|hostkey|allowgroups) continue ;; esac
+        eff=$(awk -v k="${kw,,}" '$1 == k { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$effconf")
+        if [ "${eff,,}" != "${val,,}" ]; then
+            warn "sshd still uses '${kw} ${eff:-<unset>}', not the '${kw} ${val}' just written - set somewhere it reads first (a Match block, an Include)"
+        fi
+    done <<<"$content"
+    return 0
+}
+
 # ---- Arg parsing ----------------------------------------------------------
 # Print the header comment block, from line 2 to the `-h, --help` line that
 # ends it. The range used to be hard-coded and went stale twice — every time
@@ -681,18 +791,27 @@ ClientAliveInterval 300
 ClientAliveCountMax 3
 EOF
 )
+    # What this step ENFORCES, i.e. what must win over any file sshd reads
+    # first. The lockout fallback (no key found -> passwords stay on) is a
+    # guard, not a policy: an earlier "PasswordAuthentication no" is someone
+    # already logging in by key, and reclaiming it would weaken the box.
+    local enforced=$content
+    [ "$pw_auth" = no ] || enforced=$(grep -v '^PasswordAuthentication ' <<<"$content")
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would write %s:\n' "$c_yellow" "$c_reset" "$SSHD_DROPIN"
         printf '%s\n' "$content" | sed 's/^/        /'
+        sshd_reclaim "$SSHD_DROPIN" "$enforced"
         return 0
     fi
 
+    sshd_reclaim "$SSHD_DROPIN" "$enforced"
     install -d -m 755 /etc/ssh/sshd_config.d
     printf '%s\n' "$content" > "$SSHD_DROPIN"
     chmod 644 "$SSHD_DROPIN"
     if sshd -t; then
         systemctl reload ssh 2>/dev/null || systemctl reload sshd
         ok "SSH config applied and reloaded"
+        sshd_confirm "$enforced"
     else
         err "sshd config test FAILED — not reloading. Check $SSHD_DROPIN"
         return 1
@@ -961,6 +1080,7 @@ setup_banners() {
     local sshd_banner_dropin="/etc/ssh/sshd_config.d/98-banner.conf"
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would write the legal banner to /etc/issue, /etc/issue.net and /etc/motd, and point sshd Banner at /etc/issue.net\n' "$c_yellow" "$c_reset"
+        sshd_reclaim "$sshd_banner_dropin" 'Banner /etc/issue.net'
         return 0
     fi
     # The stock files advertise the exact OS ("Debian GNU/Linux 13 \n \l"),
@@ -985,7 +1105,9 @@ setup_banners() {
         warn "sshd not installed — banner files written, ssh Banner skipped"
         return 0
     fi
-    if [ -f "$sshd_banner_dropin" ] && grep -qxF "Banner /etc/issue.net" "$sshd_banner_dropin"; then
+    sshd_reclaim "$sshd_banner_dropin" 'Banner /etc/issue.net'
+    if [ -f "$sshd_banner_dropin" ] && grep -qxF "Banner /etc/issue.net" "$sshd_banner_dropin" \
+        && [ "$SSHD_RECLAIMED" -eq 0 ]; then
         ok "sshd already presents the banner before login"
     else
         printf 'Banner /etc/issue.net\n' > "$sshd_banner_dropin"
@@ -993,6 +1115,7 @@ setup_banners() {
         if sshd -t 2>/dev/null; then
             systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
             ok "sshd now presents the banner before authentication"
+            sshd_confirm 'Banner /etc/issue.net'
         else
             rm -f "$sshd_banner_dropin"
             err "sshd config validation failed after adding the banner — reverted"
@@ -1070,13 +1193,15 @@ EOF
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would write %s:\n' "$c_yellow" "$c_reset" "$dropin"
         printf '%s\n' "$content" | sed 's/^/        /'
+        sshd_reclaim "$dropin" "$content"
         return 0
     fi
     if ! command -v sshd >/dev/null 2>&1; then
         warn "sshd not installed — SSH session policies skipped"
         return 0
     fi
-    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$content" ]; then
+    sshd_reclaim "$dropin" "$content"
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$content" ] && [ "$SSHD_RECLAIMED" -eq 0 ]; then
         ok "SSH session policies already in place"
         return 0
     fi
@@ -1088,6 +1213,7 @@ EOF
     if sshd -t 2>/dev/null; then
         systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
         ok "SSH sessions can no longer forward, and logins log key fingerprints"
+        sshd_confirm "$content"
     else
         rm -f "$dropin"
         err "sshd config validation failed after adding session policies — reverted"
@@ -1658,6 +1784,7 @@ setup_ssh_access_control() {
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would create group %s, add %s to it, and write %s with AllowGroups %s\n' \
             "$c_yellow" "$c_reset" "$SSH_ACCESS_GROUP" "$ADMIN_USER" "$SSH_ACCESS_DROPIN" "$SSH_ACCESS_GROUP"
+        sshd_reclaim "$SSH_ACCESS_DROPIN" "AllowGroups $SSH_ACCESS_GROUP"
         return 0
     fi
     # Group first, admin in it, THEN the sshd directive — never the other way
@@ -1679,7 +1806,11 @@ setup_ssh_access_control() {
 AllowGroups $SSH_ACCESS_GROUP
 EOF
 )
-    if [ -f "$SSH_ACCESS_DROPIN" ] && [ "$(cat "$SSH_ACCESS_DROPIN")" = "$content" ]; then
+    # AllowGroups ACCUMULATES across the files sshd reads: an earlier
+    # "AllowGroups admins" lets that group in next to this one (measured), so
+    # the promise "only $SSH_ACCESS_GROUP" needs the earlier lines reclaimed.
+    sshd_reclaim "$SSH_ACCESS_DROPIN" "$content"
+    if [ -f "$SSH_ACCESS_DROPIN" ] && [ "$(cat "$SSH_ACCESS_DROPIN")" = "$content" ] && [ "$SSHD_RECLAIMED" -eq 0 ]; then
         ok "SSH access already limited to $SSH_ACCESS_GROUP"
         return 0
     fi
@@ -2910,13 +3041,15 @@ EOF
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    %s(dry-run)%s would write %s:\n' "$c_yellow" "$c_reset" "$dropin"
         printf '%s\n' "$content" | sed 's/^/        /'
+        sshd_reclaim "$dropin" "$content"
         return 0
     fi
     if ! command -v sshd >/dev/null 2>&1; then
         warn "sshd not installed — SSH crypto policy skipped"
         return 0
     fi
-    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$content" ]; then
+    sshd_reclaim "$dropin" "$content"
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$content" ] && [ "$SSHD_RECLAIMED" -eq 0 ]; then
         ok "SSH crypto policy already in place"
         return 0
     fi
@@ -2928,6 +3061,7 @@ EOF
     if sshd -t 2>/dev/null; then
         systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
         ok "SSH negotiates modern crypto only (no sha1, no NIST curves, PQ-ready)"
+        sshd_confirm "$content"
     else
         rm -f "$dropin"
         err "sshd config validation failed after adding the crypto policy — reverted"
@@ -4101,13 +4235,19 @@ HostKeyAlgorithms $algs"
         [ -f "$ed" ] || printf '    %s(dry-run)%s would generate the missing %s\n' "$c_yellow" "$c_reset" "$ed"
         printf '    %s(dry-run)%s would write %s:\n' "$c_yellow" "$c_reset" "$SSH_HOSTKEYS_DROPIN"
         printf '%s\n' "$content" | sed 's/^/        /'
+        sshd_reclaim "$SSH_HOSTKEYS_DROPIN" "HostKeyAlgorithms $algs"
         return 0
     fi
     if [ ! -f "$ed" ]; then
         ssh-keygen -q -t ed25519 -N '' -f "$ed" || { err "could not generate $ed - host key policy not applied"; return 1; }
         ok "generated the missing ed25519 host key"
     fi
-    if [ -f "$SSH_HOSTKEYS_DROPIN" ] && [ "$(cat "$SSH_HOSTKEYS_DROPIN")" = "$content" ]; then
+    # The pin is HostKeyAlgorithms, and it is first-wins: a drop-in read
+    # before this one with its own list would put ECDSA back (measured), so
+    # that line is reclaimed. Earlier HostKey lines only LOAD a key; with the
+    # pin in force it is never offered, so they are left alone.
+    sshd_reclaim "$SSH_HOSTKEYS_DROPIN" "HostKeyAlgorithms $algs"
+    if [ -f "$SSH_HOSTKEYS_DROPIN" ] && [ "$(cat "$SSH_HOSTKEYS_DROPIN")" = "$content" ] && [ "$SSHD_RECLAIMED" -eq 0 ]; then
         ok "SSH host key policy already in place"
         return 0
     fi
@@ -4118,6 +4258,7 @@ HostKeyAlgorithms $algs"
         systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
         ok "sshd proves its identity with ed25519$([ "$bits" -ge 3072 ] && echo " and RSA-$bits") only"
         warn "a client that pinned ONLY this box's ECDSA key will now see a changed identity - see step 51 in the README"
+        sshd_confirm "HostKeyAlgorithms $algs"
     else
         rm -f "$SSH_HOSTKEYS_DROPIN"
         err "sshd config validation failed after pinning the host keys - reverted"
