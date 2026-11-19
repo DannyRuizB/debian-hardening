@@ -220,3 +220,36 @@ reclaim_tree() {
   [[ "$output" == *"n=3"* ]]
   [ "$before" = "$(cat "$T/sshd_config" "$T"/sshd_config.d/*.conf | sha256sum)" ]
 }
+
+# Two keywords break first-wins (measured on OpenSSH 10.0p2 and 9.2):
+# MaxStartups is LAST-wins, so only a line read after ours beats it, and
+# AllowGroups accumulates from every file, before or after. The main file
+# counts twice: above its Include (read first) and below it (read last).
+@test "sshd_reclaim takes MaxStartups from later lines and AllowGroups from every side" {
+  T="$BATS_TEST_TMPDIR/ssh"
+  mkdir -p "$T/sshd_config.d"
+  printf 'MaxStartups 50:30:100\nInclude %s/sshd_config.d/*.conf\nAllowGroups admins\nMaxStartups 100:30:200\nX11Forwarding yes\n\nMatch User sftp\n    AllowGroups sftp\n' "$T" > "$T/sshd_config"
+  printf 'AllowGroups adm\n' > "$T/sshd_config.d/10-early.conf"
+  printf 'maxstartups=200\nAllowGroups ssh-users\n' > "$T/sshd_config.d/zz-late.conf"
+  OURS="$T/sshd_config.d/97-hardening-policies.conf"
+  CONTENT=$'MaxStartups 10:30:60\nAllowGroups ssh-users\nX11Forwarding no'
+  run bash -c "source '$SCRIPT'; SSHD_MAIN_CONFIG='$T/sshd_config'; SSHD_DROPIN_DIR='$T/sshd_config.d'; sshd_reclaim '$OURS' \"\$1\" 2>/dev/null; echo \"n=\$SSHD_RECLAIMED\"; sshd_reclaim '$OURS' \"\$1\" 2>/dev/null; echo \"again=\$SSHD_RECLAIMED\"" _ "$CONTENT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"n=4"* ]]
+  [[ "$output" == *"again=0"* ]]
+  m='# debian-hardening (shadowed 97-hardening-policies.conf): '
+  # Below the Include: the appended AllowGroups and the later MaxStartups win
+  # or add up there, so they go; a first-wins keyword there already loses.
+  grep -qxF "${m}AllowGroups admins" "$T/sshd_config"
+  grep -qxF "${m}MaxStartups 100:30:200" "$T/sshd_config"
+  grep -qx 'X11Forwarding yes' "$T/sshd_config"
+  # Above the Include, MaxStartups loses to ours anyway: left.
+  grep -qx 'MaxStartups 50:30:100' "$T/sshd_config"
+  # A drop-in read first adds its group; one read last overrides MaxStartups
+  # (key=value counts) and repeats our own group, which changes nothing.
+  grep -qxF "${m}AllowGroups adm" "$T/sshd_config.d/10-early.conf"
+  grep -qxF "${m}maxstartups=200" "$T/sshd_config.d/zz-late.conf"
+  grep -qx 'AllowGroups ssh-users' "$T/sshd_config.d/zz-late.conf"
+  # A Match block applies per connection: left, wherever it is.
+  grep -qx '    AllowGroups sftp' "$T/sshd_config"
+}

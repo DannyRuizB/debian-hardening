@@ -28,7 +28,7 @@ tools. No Ansible, no Python — drop it on the box and run it.
 | Step | Detail |
 |---|---|
 | **Admin user** | Optional: create a sudo user, install your SSH public key, and grant passwordless sudo (the user has no password, so otherwise couldn't escalate). |
-| **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port, plus CIS extras (`MaxAuthTries`, `X11Forwarding no`, `LoginGraceTime`, idle timeout). Validates with `sshd -t` before reloading, and every SSH step reclaims its keywords from any file sshd reads first — see [sshd precedence](#sshd-precedence-the-drop-ins-must-actually-win). |
+| **SSH** | Drop-in `99-hardening.conf`: no root login, key-only auth, custom port, plus CIS extras (`MaxAuthTries`, `X11Forwarding no`, `LoginGraceTime`, idle timeout). Validates with `sshd -t` before reloading, and every SSH step reclaims its keywords from any line that beats its drop-in — see [sshd precedence](#sshd-precedence-the-drop-ins-must-actually-win). |
 | **Firewall** | UFW: default deny incoming, allow SSH (and any extra ports you pass). |
 | **Fail2Ban** | `sshd` jail, `backend = systemd`, `banaction = ufw`, ban 1h / maxretry 5, journal match on the ssh unit (works with OpenSSH ≥ 9.8's `sshd-session`). |
 | **Updates** | `unattended-upgrades` for automatic security patches. |
@@ -106,8 +106,20 @@ to it, the effective config after a full run still had `X11Forwarding yes`,
 first in `HostKeyAlgorithms` and `AllowGroups adm` *next to* `ssh-users` —
 `AllowGroups` and `HostKey` don't shadow, they **accumulate**.
 
-So every SSH step now reclaims its keywords: a line read before its drop-in,
-with a value that isn't the step's, is **commented out — never deleted** —
+Two keywords break first-wins, so for them a line read **after** the drop-ins
+counts too — the tail of `sshd_config`, where `echo … >> /etc/ssh/sshd_config`
+lands, or a drop-in that sorts later. **Measured** for all 24 keywords the SSH
+steps write, on debian:13 (OpenSSH 10.0p2) and debian:12 (9.2), with the
+opposite value read before and after: 22 keep the first value; **`MaxStartups`
+keeps the last** (an appended `MaxStartups 100:30:200` beat the step's
+`10:30:60`), and **`AllowGroups` adds up from every file** (an appended
+`AllowGroups admins` let `admins` in next to `ssh-users`, under a step 34 that
+reports *SSH login limited to ssh-users*).
+
+So every SSH step now reclaims its keywords from wherever a line beats them —
+read before its drop-in for first-wins keywords, read after it for
+`MaxStartups`, anywhere for `AllowGroups`. A line like that, with a value that
+isn't the step's, is **commented out — never deleted** —
 behind `# debian-hardening (shadowed <drop-in>): `, and after the reload the
 step compares `sshd -T` with what it wrote and names any keyword that still
 loses. Left alone, on purpose: **`Port`** (another listening port may be
@@ -117,7 +129,8 @@ file's first `Match` on is touched), a line with the **same value**, and the
 password fallback of the lockout guard (an earlier `PasswordAuthentication no`
 is someone already logging in by key). cloud-init writes its file once per
 instance; a second write appends a fresh line, and the next run reclaims it.
-The CI plants both files and the main-file line; `verify.sh` checks **every
+The CI plants all of it — the two early drop-ins, a line above the `Include`,
+a late `zz-local.conf` and lines appended to `sshd_config`; `verify.sh` checks **every
 keyword line of every hardening drop-in** against `sshd -T`, so a keyword added
 tomorrow is covered the day it is written.
 

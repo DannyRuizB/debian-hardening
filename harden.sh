@@ -468,14 +468,22 @@ run() {
 # writes sshd_config.d/50-cloud-init.conf with "PasswordAuthentication yes",
 # and next to a 99- drop-in saying "no" the effective value stayed YES; a
 # 10-admin.conf won X11Forwarding and MaxAuthTries the same way, and
-# `key=value` or odd case counts too. HostKey and AllowGroups do not shadow,
-# they ACCUMULATE: an earlier "AllowGroups admins" let that group in next to
-# ours.
+# `key=value` or odd case counts too.
+# Two keywords break the first-wins rule, measured for all 24 the SSH steps
+# write, on debian:13 (OpenSSH 10.0p2) and debian:12 (9.2), with the opposite
+# value read before and after the drop-in:
+#   - MaxStartups is LAST-wins: a line read AFTER ours beats it - one below the
+#     Include of sshd_config (where `echo ... >> sshd_config` lands) or in a
+#     drop-in sorting after ours. One read before loses anyway.
+#   - AllowGroups ACCUMULATES from every file sshd reads, before or after:
+#     "AllowGroups admins" appended to sshd_config let admins in next to ours.
+#     (Port and HostKey accumulate the same way.)
 #
 # sshd_reclaim comments out (never deletes) each such line whose value is not
 # ours, with a marker naming the drop-in it shadowed - the original text stays
 # in place to read or restore. Ours winning is what the drop-ins already do to
-# the main file below its Include; this makes it independent of file names.
+# first-wins lines below the Include; this makes it independent of file names
+# and of where a line was added.
 # Left alone, said out loud:
 #   - Port: another Port line is another listening socket someone may be on
 #     right now - cutting it could lock them out. Named, not touched (the
@@ -489,12 +497,22 @@ SSHD_MAIN_CONFIG=/etc/ssh/sshd_config
 SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
 SSHD_RECLAIMED=0
 
+# sshd_side KEYWORD - from which side of a drop-in a line beats it (lowercase
+# keyword in): before (first-wins), after (last-wins) or both (accumulates).
+sshd_side() {
+    case "$1" in
+        maxstartups) echo after ;;
+        allowgroups|port|hostkey) echo both ;;
+        *) echo before ;;
+    esac
+}
+
 # sshd_reclaim DROPIN CONTENT - CONTENT is what the step writes to DROPIN.
 # Sets SSHD_RECLAIMED to the lines commented out (in a dry run: planned).
 sshd_reclaim() {
-    local ours="$1" content="$2" base kw val f n hit text ismain
+    local ours="$1" content="$2" base kw val f n hit text ismain side job why
     local -A rk_want=()
-    local -a before=() sedx=()
+    local -a jobs=() sedx=()
     base=${ours##*/}
     SSHD_RECLAIMED=0
     while read -r kw val; do
@@ -503,16 +521,20 @@ sshd_reclaim() {
         rk_want[$kw]+="|${val,,}|"
     done <<<"$content"
     [ "${#rk_want[@]}" -gt 0 ] || return 0
-    # What sshd reads before DROPIN: the main file above its Include, then the
-    # drop-ins whose names sort before it (glob order, C collation).
-    [ -f "$SSHD_MAIN_CONFIG" ] && before+=("$SSHD_MAIN_CONFIG")
+    # What sshd reads, in order: the main file above its Include, the drop-ins
+    # (glob order, C collation) - DROPIN among them - then the main file below
+    # the Include. Each piece is scanned for the keywords that side can win.
+    side=before
+    [ -f "$SSHD_MAIN_CONFIG" ] && jobs+=("before $SSHD_MAIN_CONFIG")
     while IFS= read -r f; do
-        [ "$f" = "$base" ] && break
-        before+=("$SSHD_DROPIN_DIR/$f")
+        if [ "$f" = "$base" ]; then side=after; continue; fi
+        jobs+=("$side $SSHD_DROPIN_DIR/$f")
     done < <({ printf '%s\n' "$base"
                for f in "$SSHD_DROPIN_DIR"/*.conf; do [ -f "$f" ] && printf '%s\n' "${f##*/}"; done
              } | LC_ALL=C sort -u)
-    for f in "${before[@]}"; do
+    [ -f "$SSHD_MAIN_CONFIG" ] && jobs+=("after $SSHD_MAIN_CONFIG")
+    for job in "${jobs[@]}"; do
+        side=${job%% *} f=${job#* }
         sedx=()
         ismain=0
         [ "$f" != "$SSHD_MAIN_CONFIG" ] || ismain=1
@@ -523,19 +545,30 @@ sshd_reclaim() {
                 continue
             fi
             SSHD_RECLAIMED=$((SSHD_RECLAIMED + 1))
+            case "$kw" in
+                allowgroups) why="AllowGroups adds up across every file sshd reads: its groups were let in next to $base's" ;;
+                maxstartups) why="read after $base, and sshd keeps the LAST MaxStartups" ;;
+                *) why="read before $base, and sshd keeps the first value it reads" ;;
+            esac
             if [ "$DRY_RUN" -eq 1 ]; then
-                printf '    %s(dry-run)%s would comment out %s:%s "%s" - it shadows %s\n' \
-                    "$c_yellow" "$c_reset" "$f" "$n" "$text" "$base"
+                printf '    %s(dry-run)%s would comment out %s:%s "%s" - %s\n' \
+                    "$c_yellow" "$c_reset" "$f" "$n" "$text" "$why"
             else
                 sedx+=(-e "${n}s|^|# debian-hardening (shadowed $base): |")
-                warn "commented out $f:$n \"$text\" - read before $base, it was the value sshd used"
+                warn "commented out $f:$n \"$text\" - $why"
             fi
-        done < <(awk -v main="$ismain" '
-            NR == FNR { split($0, p, "\t"); want[p[1]] = p[2]; next }
+        done < <(awk -v main="$ismain" -v side="$side" '
+            NR == FNR { split($0, p, "\t"); if (p[3] == side || p[3] == "both") want[p[1]] = p[2]; next }
             {
                 low = tolower($0)
                 if (low ~ /^[[:space:]]*match([[:space:]]|$)/) exit
-                if (main && low ~ /^[[:space:]]*include[[:space:]]/) exit
+                # The main file is read in two pieces: above its Include
+                # (before every drop-in) and below it (after them all).
+                if (main && low ~ /^[[:space:]]*include[[:space:]]/) {
+                    if (side == "before") exit
+                    below = 1; next
+                }
+                if (main && side == "after" && !below) next
                 sub(/^[[:space:]]+/, "", low)
                 if (low == "" || low ~ /^#/) next
                 kw = low; sub(/[[:space:]=].*$/, "", kw)
@@ -545,7 +578,7 @@ sshd_reclaim() {
                 if (index(want[kw], "|" val "|")) next
                 text = $0; sub(/^[[:space:]]+/, "", text)
                 print FNR "\t" kw "\t" text
-            }' <(for hit in "${!rk_want[@]}"; do printf '%s\t%s\n' "$hit" "${rk_want[$hit]}"; done) "$f")
+            }' <(for hit in "${!rk_want[@]}"; do printf '%s\t%s\t%s\n' "$hit" "${rk_want[$hit]}" "$(sshd_side "$hit")"; done) "$f")
         [ "${#sedx[@]}" -eq 0 ] || sed -i "${sedx[@]}" "$f"
     done
     return 0
@@ -562,7 +595,7 @@ sshd_confirm() {
         case "${kw,,}" in ''|'#'*|port|hostkey|allowgroups) continue ;; esac
         eff=$(awk -v k="${kw,,}" '$1 == k { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$effconf")
         if [ "${eff,,}" != "${val,,}" ]; then
-            warn "sshd still uses '${kw} ${eff:-<unset>}', not the '${kw} ${val}' just written - set somewhere it reads first (a Match block, an Include)"
+            warn "sshd still uses '${kw} ${eff:-<unset>}', not the '${kw} ${val}' just written - set somewhere this step does not reclaim (a Match block, another Include)"
         fi
     done <<<"$content"
     return 0
@@ -1806,9 +1839,10 @@ setup_ssh_access_control() {
 AllowGroups $SSH_ACCESS_GROUP
 EOF
 )
-    # AllowGroups ACCUMULATES across the files sshd reads: an earlier
-    # "AllowGroups admins" lets that group in next to this one (measured), so
-    # the promise "only $SSH_ACCESS_GROUP" needs the earlier lines reclaimed.
+    # AllowGroups ACCUMULATES across the files sshd reads: an "AllowGroups
+    # admins" anywhere - a drop-in read first, or a line appended to the end of
+    # sshd_config - lets that group in next to this one (measured), so the
+    # promise "only $SSH_ACCESS_GROUP" needs every such line reclaimed.
     sshd_reclaim "$SSH_ACCESS_DROPIN" "$content"
     if [ -f "$SSH_ACCESS_DROPIN" ] && [ "$(cat "$SSH_ACCESS_DROPIN")" = "$content" ] && [ "$SSHD_RECLAIMED" -eq 0 ]; then
         ok "SSH access already limited to $SSH_ACCESS_GROUP"
